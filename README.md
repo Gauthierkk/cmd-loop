@@ -18,17 +18,31 @@ Commands run in a login shell (`$SHELL -l -c`) so your PATH and environment are 
 ## Install
 
 ```bash
+brew tap Gauthierkk/cmdloop
+brew install cmdloop
+```
+
+Then run it:
+
+```bash
+cmdloop
+```
+
+It launches in the background and appears as a **⏲** icon in your menu bar.
+
+### From source
+
+```bash
 git clone https://github.com/Gauthierkk/cmd-loop.git
 cd cmd-loop
 ./install.sh
 ```
 
-This builds a release binary, copies it to `/usr/local/bin`, and installs a launchd agent so it starts on login.
-
 ## Uninstall
 
 ```bash
-./uninstall.sh
+brew uninstall cmdloop
+brew untap Gauthierkk/cmdloop
 ```
 
 ## Development
