@@ -6,6 +6,8 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     private var nameField: NSTextField!
     private var commandTextView: NSTextView!
     private var cronField: NSTextField!
+    private var outputContainer: NSStackView!
+    private var outputTextView: NSTextView!
     private var jobs: [CronJob] = []
     private var editingJobId: UUID?
     weak var popover: NSPopover?
@@ -87,6 +89,43 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         addFormContainer.isHidden = true
         addFormContainer.translatesAutoresizingMaskIntoConstraints = false
 
+        // Output panel (hidden by default)
+        outputTextView = NSTextView()
+        outputTextView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        outputTextView.isEditable = false
+        outputTextView.isRichText = false
+        outputTextView.backgroundColor = NSColor.black.withAlphaComponent(0.85)
+        outputTextView.textColor = .white
+        outputTextView.textContainerInset = NSSize(width: 6, height: 6)
+
+        let outputScroll = NSScrollView()
+        outputScroll.documentView = outputTextView
+        outputScroll.hasVerticalScroller = true
+        outputScroll.borderType = .noBorder
+        outputScroll.translatesAutoresizingMaskIntoConstraints = false
+        outputScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
+        outputTextView.minSize = NSSize(width: 0, height: 120)
+        outputTextView.isVerticallyResizable = true
+        outputTextView.isHorizontallyResizable = false
+        outputTextView.autoresizingMask = [.width]
+        outputTextView.textContainer?.widthTracksTextView = true
+
+        let closeOutputBtn = NSButton(title: "✕ Close", target: self, action: #selector(hideOutput))
+        closeOutputBtn.bezelStyle = .toolbar
+        closeOutputBtn.font = .systemFont(ofSize: 11)
+
+        let outputHeader = NSStackView(views: [NSView(), closeOutputBtn])
+        outputHeader.orientation = .horizontal
+        outputHeader.spacing = 4
+        outputHeader.edgeInsets = NSEdgeInsets(top: 2, left: 8, bottom: 0, right: 8)
+
+        outputContainer = NSStackView(views: [outputHeader, outputScroll])
+        outputContainer.orientation = .vertical
+        outputContainer.alignment = .width
+        outputContainer.spacing = 0
+        outputContainer.isHidden = true
+        outputContainer.translatesAutoresizingMaskIntoConstraints = false
+
         // Separator
         let separator = NSBox()
         separator.boxType = .separator
@@ -102,14 +141,19 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         quitBtn.bezelStyle = .toolbar
         quitBtn.translatesAutoresizingMaskIntoConstraints = false
 
-        let bottomRow = NSStackView(views: [addBtn, quitBtn])
+        let clearLogsBtn = NSButton(title: "Clear Logs", target: self, action: #selector(clearLogs))
+        clearLogsBtn.bezelStyle = .toolbar
+        clearLogsBtn.translatesAutoresizingMaskIntoConstraints = false
+
+        let bottomRow = NSStackView(views: [addBtn, clearLogsBtn, quitBtn])
         bottomRow.orientation = .horizontal
-        bottomRow.distribution = .equalSpacing
+        bottomRow.alignment = .centerY
+        bottomRow.spacing = 12
         bottomRow.translatesAutoresizingMaskIntoConstraints = false
         bottomRow.edgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 8, right: 12)
 
         // Main layout
-        let mainStack = NSStackView(views: [stackView, addFormContainer, separator, bottomRow])
+        let mainStack = NSStackView(views: [stackView, outputContainer, addFormContainer, separator, bottomRow])
         mainStack.orientation = .vertical
         mainStack.spacing = 0
         mainStack.translatesAutoresizingMaskIntoConstraints = false
@@ -124,7 +168,7 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     }
 
     private func loadJobs() {
-        jobs = ConfigManager.shared.load()
+        jobs = CrontabManager.shared.loadAllJobs()
         rebuildJobList()
     }
 
@@ -216,10 +260,20 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         }
         editingJobId = nil
         ConfigManager.shared.save(jobs)
-        Scheduler.shared.scheduleAll(jobs)
+        CrontabManager.shared.sync(jobs)
         rebuildJobList()
         addFormContainer.isHidden = true
         resizePopover()
+    }
+
+    @objc private func clearLogs() {
+        let logDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/cmd-loop/logs")
+        if let files = try? FileManager.default.contentsOfDirectory(at: logDir, includingPropertiesForKeys: nil) {
+            for file in files where file.pathExtension == "log" {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
     }
 
     @objc private func quitApp() {
@@ -232,11 +286,23 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         guard let idx = jobs.firstIndex(where: { $0.id == job.id }) else { return }
         jobs[idx].isEnabled = enabled
         ConfigManager.shared.save(jobs)
-        Scheduler.shared.scheduleAll(jobs)
+        CrontabManager.shared.sync(jobs)
     }
 
     func didRunNow(_ job: CronJob) {
-        Scheduler.shared.runNow(job)
+        outputTextView.string = "$ \(job.command)\n"
+        outputContainer.isHidden = false
+        resizePopover()
+        CrontabManager.shared.runNow(job) { [weak self] text in
+            guard let self else { return }
+            self.outputTextView.string += text
+            self.outputTextView.scrollToEndOfDocument(nil)
+        }
+    }
+
+    @objc private func hideOutput() {
+        outputContainer.isHidden = true
+        resizePopover()
     }
 
     func didEditJob(_ job: CronJob) {
@@ -246,7 +312,7 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     func didDeleteJob(_ job: CronJob) {
         jobs.removeAll { $0.id == job.id }
         ConfigManager.shared.save(jobs)
-        Scheduler.shared.scheduleAll(jobs)
+        CrontabManager.shared.sync(jobs)
         rebuildJobList()
     }
 }

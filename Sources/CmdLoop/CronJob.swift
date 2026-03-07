@@ -101,114 +101,210 @@ struct CronParser {
         return result
     }
 
-    func nextDate(after date: Date = Date()) -> Date? {
-        let calendar = Calendar.current
-        var comps = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
-        comps.second = 0
-        guard let base = calendar.date(from: comps),
-              var candidate = calendar.date(byAdding: .minute, value: 1, to: base)
-        else { return nil }
-
-        for _ in 0..<525_600 {
-            let c = calendar.dateComponents([.minute, .hour, .day, .month, .weekday], from: candidate)
-            let dow = c.weekday! - 1 // Calendar: 1=Sunday → 0=Sunday
-            if minutes.contains(c.minute!) &&
-               hours.contains(c.hour!) &&
-               daysOfMonth.contains(c.day!) &&
-               months.contains(c.month!) &&
-               daysOfWeek.contains(dow) {
-                return candidate
-            }
-            candidate = calendar.date(byAdding: .minute, value: 1, to: candidate)!
-        }
-        return nil
-    }
 }
 
-// MARK: - Scheduler
+// MARK: - Crontab Manager
 
 extension Notification.Name {
     static let jobsDidChange = Notification.Name("jobsDidChange")
 }
 
-class Scheduler {
-    static let shared = Scheduler()
+class CrontabManager {
+    static let shared = CrontabManager()
     private init() {}
-    private var timers: [UUID: Timer] = [:]
 
-    func scheduleAll(_ jobs: [CronJob]) {
-        timers.values.forEach { $0.invalidate() }
-        timers.removeAll()
+    private let marker = "# cmdloop:"
+
+    /// Reads crontab and returns all entries as CronJob objects.
+    /// cmdloop-managed entries get their name from config. External entries get "cronjob".
+    func loadAllJobs() -> [CronJob] {
+        let lines = readCrontab()
+        let configJobs = ConfigManager.shared.load()
+        let configMap = Dictionary(uniqueKeysWithValues: configJobs.map { ($0.id, $0) })
+
+        var jobs: [CronJob] = []
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            if line.hasPrefix(marker) {
+                // cmdloop-managed entry
+                let uuidStr = String(line.dropFirst(marker.count))
+                i += 1
+                if i < lines.count, let uuid = UUID(uuidString: uuidStr) {
+                    let cronLine = lines[i]
+                    if let config = configMap[uuid] {
+                        jobs.append(config)
+                    } else {
+                        // cmdloop marker but no config — parse what we can
+                        let parsed = parseCronLine(cronLine)
+                        jobs.append(CronJob(id: uuid, name: "cronjob", command: parsed.command, cronExpression: parsed.cron))
+                    }
+                }
+            } else if !line.isEmpty, !line.hasPrefix("#") {
+                // External cron entry
+                let parsed = parseCronLine(line)
+                if !parsed.cron.isEmpty {
+                    jobs.append(CronJob(name: "cronjob", command: parsed.command, cronExpression: parsed.cron, isEnabled: true))
+                }
+            }
+            i += 1
+        }
+
+        // Also include disabled cmdloop jobs (not in crontab but in config)
+        let activeIds = Set(jobs.compactMap { $0.id })
+        for config in configJobs where !config.isEnabled && !activeIds.contains(config.id) {
+            jobs.append(config)
+        }
+
+        return jobs
+    }
+
+    private func parseCronLine(_ line: String) -> (cron: String, command: String) {
+        let parts = line.split(separator: " ", maxSplits: 5, omittingEmptySubsequences: false)
+        guard parts.count >= 6 else { return (line, "") }
+        let cron = parts[0..<5].joined(separator: " ")
+        let command = String(parts[5...].joined(separator: " "))
+        return (cron, command)
+    }
+
+    func sync(_ jobs: [CronJob]) {
+        // Read existing crontab, preserve non-cmdloop entries
+        var lines = readCrontab()
+        lines = filterOutCmdloopEntries(lines)
+
+        // Add enabled jobs
         for job in jobs where job.isEnabled {
-            scheduleNext(job)
+            lines.append("\(marker)\(job.id.uuidString)")
+            lines.append("\(job.cronExpression) \(shellLine(for: job))")
         }
+
+        writeCrontab(lines)
     }
 
-    private func scheduleNext(_ job: CronJob) {
-        guard let cron = try? CronParser(job.cronExpression),
-              let nextDate = cron.nextDate()
-        else { return }
+    func runNow(_ job: CronJob, onOutput: ((String) -> Void)? = nil) {
+        let logFile = self.logFileURL(for: job)
+        self.ensureLogFile(logFile)
+        let logHandle = try? FileHandle(forWritingTo: logFile)
+        logHandle?.seekToEndOfFile()
+        logHandle?.write("\n--- \(Date()) [manual] ---\n".data(using: .utf8)!)
 
-        let interval = nextDate.timeIntervalSinceNow
-        guard interval > 0 else { return }
-
-        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
-            self?.executeJob(job)
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        timers[job.id] = timer
-    }
-
-    func runNow(_ job: CronJob) {
-        executeJob(job, reschedule: false)
-    }
-
-    private func executeJob(_ job: CronJob, reschedule: Bool = true) {
         DispatchQueue.global(qos: .utility).async {
             let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
             let process = Process()
             process.executableURL = URL(fileURLWithPath: shell)
             process.arguments = ["-l", "-c", job.command]
 
-            // Log output to ~/.config/cmd-loop/logs/<id>.log
-            let logDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".config/cmd-loop/logs")
-            try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
-            let safeName = job.name.lowercased()
-                .replacingOccurrences(of: " ", with: "-")
-                .filter { $0.isLetter || $0.isNumber || $0 == "-" }
-            let logFile = logDir.appendingPathComponent("\(safeName)-\(job.id.uuidString).log")
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
 
-            if !FileManager.default.fileExists(atPath: logFile.path) {
-                FileManager.default.createFile(atPath: logFile.path, contents: nil)
+            // Stream output as it arrives
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                logHandle?.write(data)
+                if let text = String(data: data, encoding: .utf8) {
+                    DispatchQueue.main.async { onOutput?(text) }
+                }
             }
-            if let fh = try? FileHandle(forWritingTo: logFile) {
-                fh.seekToEndOfFile()
-                let header = "\n--- \(Date()) ---\n".data(using: .utf8)!
-                fh.write(header)
-                process.standardOutput = fh
-                process.standardError = fh
-                try? process.run()
-                process.waitUntilExit()
-                fh.closeFile()
-            } else {
-                process.standardOutput = FileHandle.nullDevice
-                process.standardError = FileHandle.nullDevice
-                try? process.run()
-                process.waitUntilExit()
+
+            try? process.run()
+            process.waitUntilExit()
+
+            // Read any remaining data
+            pipe.fileHandleForReading.readabilityHandler = nil
+            let remaining = pipe.fileHandleForReading.readDataToEndOfFile()
+            if !remaining.isEmpty {
+                logHandle?.write(remaining)
+                if let text = String(data: remaining, encoding: .utf8) {
+                    DispatchQueue.main.async { onOutput?(text) }
+                }
             }
+            logHandle?.closeFile()
 
             DispatchQueue.main.async {
                 var jobs = ConfigManager.shared.load()
                 if let idx = jobs.firstIndex(where: { $0.id == job.id }) {
                     jobs[idx].lastRunTime = Date()
                     ConfigManager.shared.save(jobs)
-                    if reschedule {
-                        self.scheduleNext(jobs[idx])
-                    }
                 }
                 NotificationCenter.default.post(name: .jobsDidChange, object: nil)
             }
         }
+    }
+
+    // MARK: - Private
+
+    private func shellLine(for job: CronJob) -> String {
+        let escaped = job.command.replacingOccurrences(of: "'", with: "'\\''")
+        let logFile = logFileURL(for: job).path
+        return "/bin/zsh -l -c '\(escaped)' >> '\(logFile)' 2>&1"
+    }
+
+    private func logFileURL(for job: CronJob) -> URL {
+        let logDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/cmd-loop/logs")
+        try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+        let safeName = job.name.lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+            .filter { $0.isLetter || $0.isNumber || $0 == "-" }
+        return logDir.appendingPathComponent("\(safeName)-\(job.id.uuidString).log")
+    }
+
+    private func ensureLogFile(_ url: URL) {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+    }
+
+    private func readCrontab() -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/crontab")
+        process.arguments = ["-l"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        if output.isEmpty { return [] }
+        return output.components(separatedBy: "\n")
+    }
+
+    private func filterOutCmdloopEntries(_ lines: [String]) -> [String] {
+        var result: [String] = []
+        var skipNext = false
+        for line in lines {
+            if line.hasPrefix(marker) {
+                skipNext = true
+                continue
+            }
+            if skipNext {
+                skipNext = false
+                continue
+            }
+            result.append(line)
+        }
+        // Remove trailing empty lines
+        while result.last?.isEmpty == true { result.removeLast() }
+        return result
+    }
+
+    private func writeCrontab(_ lines: [String]) {
+        var content = lines.joined(separator: "\n")
+        if !content.isEmpty { content += "\n" }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/crontab")
+        process.arguments = ["-"]
+        let pipe = Pipe()
+        process.standardInput = pipe
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        pipe.fileHandleForWriting.write(content.data(using: .utf8)!)
+        pipe.fileHandleForWriting.closeFile()
+        process.waitUntilExit()
     }
 }

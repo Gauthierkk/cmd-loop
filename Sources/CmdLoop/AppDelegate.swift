@@ -7,7 +7,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.title = "⏲"
+            button.attributedTitle = NSAttributedString(
+                string: "⏲",
+                attributes: [.font: NSFont.systemFont(ofSize: 18, weight: .bold)]
+            )
             button.action = #selector(togglePopover(_:))
             button.target = self
         }
@@ -20,17 +23,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         vc.popover = popover
 
         let jobs = ConfigManager.shared.load()
-        Scheduler.shared.scheduleAll(jobs)
-
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self, selector: #selector(didWake),
-            name: NSWorkspace.didWakeNotification, object: nil
-        )
-    }
-
-    @objc private func didWake() {
-        let jobs = ConfigManager.shared.load()
-        Scheduler.shared.scheduleAll(jobs)
+        CrontabManager.shared.sync(jobs)
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {
