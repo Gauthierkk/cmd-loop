@@ -1,0 +1,45 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: macos-latest
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download and hash tarball
+        id: hash
+        run: |
+          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.release.outputs.tag }}.tar.gz"
+          SHA=$(curl -sL "$URL" | shasum -a 256 | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Clone homebrew tap
+        run: |
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/Gauthierkk/homebrew-cmdloop.git
+
+      - name: Update formula
+        run: |
+          cd homebrew-cmdloop
+          sed -i '' 's|url ".*"|url "${{ steps.hash.outputs.url }}"|' Formula/cmdloop.rb
+          sed -i '' 's|sha256 ".*"|sha256 "${{ steps.hash.outputs.sha256 }}"|' Formula/cmdloop.rb
+
+      - name: Commit and push
+        run: |
+          cd homebrew-cmdloop
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/cmdloop.rb
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "Update cmdloop to ${{ steps.release.outputs.version }}"
+          git push
