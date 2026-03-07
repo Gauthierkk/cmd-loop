@@ -3,6 +3,7 @@ name: Update Homebrew Formula
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   update-formula:
@@ -11,10 +12,16 @@ jobs:
       - name: Get release info
         id: release
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG=$(gh release view --repo ${{ github.repository }} --json tagName -q .tagName)
+          fi
           VERSION="${TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Download and hash tarball
         id: hash
@@ -37,6 +44,7 @@ jobs:
       - name: Commit and push
         run: |
           cd homebrew-cmdloop
+          git remote set-url origin https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/Gauthierkk/homebrew-cmdloop.git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/cmdloop.rb
