@@ -1,4 +1,18 @@
 import AppKit
+import Foundation
+
+// If launched without --daemon, re-launch as a detached background process and exit
+if !CommandLine.arguments.contains("--daemon") {
+    let execPath = ProcessInfo.processInfo.arguments[0]
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: execPath)
+    process.arguments = ["--daemon"]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try? process.run()
+    print("cmdloop is running in the menu bar.")
+    exit(0)
+}
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
