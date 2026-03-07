@@ -7,10 +7,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.attributedTitle = NSAttributedString(
-                string: "⏲",
-                attributes: [.font: NSFont.systemFont(ofSize: 18, weight: .bold)]
-            )
+            if let img = NSImage(systemSymbolName: "clock.arrow.2.circlepath", accessibilityDescription: "cmdloop") {
+                let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+                button.image = img.withSymbolConfiguration(config)
+            }
             button.action = #selector(togglePopover(_:))
             button.target = self
         }
