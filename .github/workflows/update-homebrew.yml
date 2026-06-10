@@ -33,18 +33,18 @@ jobs:
 
       - name: Clone homebrew tap
         run: |
-          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/Gauthierkk/homebrew-cmdloop.git
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/Gauthierkk/homebrew-tap.git
 
       - name: Update formula
         run: |
-          cd homebrew-cmdloop
+          cd homebrew-tap
           sed -i '' 's|url ".*"|url "${{ steps.hash.outputs.url }}"|' Formula/cmdloop.rb
           sed -i '' 's|sha256 ".*"|sha256 "${{ steps.hash.outputs.sha256 }}"|' Formula/cmdloop.rb
 
       - name: Commit and push
         run: |
-          cd homebrew-cmdloop
-          git remote set-url origin https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/Gauthierkk/homebrew-cmdloop.git
+          cd homebrew-tap
+          git remote set-url origin https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/Gauthierkk/homebrew-tap.git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/cmdloop.rb
