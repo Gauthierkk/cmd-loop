@@ -27,6 +27,12 @@ class JobRowView: NSView {
         toggle.target = self
         toggle.action = #selector(toggleChanged(_:))
         toggle.controlSize = .mini
+        // External entries aren't owned by cmdloop, so enabling/disabling them isn't
+        // tracked. Renaming, running, and deleting still work.
+        if job.source == .external {
+            toggle.isEnabled = false
+            toggle.toolTip = "External cron entry — enable/disable is managed in your crontab"
+        }
 
         let nameLabel = NSTextField(labelWithString: job.name)
         nameLabel.lineBreakMode = .byTruncatingTail

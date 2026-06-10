@@ -1,6 +1,15 @@
 import Foundation
+import CryptoKit
 
 // MARK: - Data Model
+
+/// Where a job came from. `managed` jobs are owned by cmdloop (tagged with a
+/// `# cmdloop:<uuid>` marker and persisted in config.json). `external` jobs were
+/// added to the crontab outside of cmdloop; we only track a display name for them.
+enum JobSource {
+    case managed
+    case external
+}
 
 struct CronJob: Codable, Identifiable {
     var id: UUID
@@ -10,13 +19,82 @@ struct CronJob: Codable, Identifiable {
     var isEnabled: Bool
     var lastRunTime: Date?
 
-    init(id: UUID = UUID(), name: String, command: String, cronExpression: String, isEnabled: Bool = true, lastRunTime: Date? = nil) {
+    /// Transient — not persisted. Defaults to `.managed` so decoded config jobs
+    /// are always treated as cmdloop-owned.
+    var source: JobSource = .managed
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, command, cronExpression, isEnabled, lastRunTime
+    }
+
+    init(id: UUID = UUID(), name: String, command: String, cronExpression: String, isEnabled: Bool = true, lastRunTime: Date? = nil, source: JobSource = .managed) {
         self.id = id
         self.name = name
         self.command = command
         self.cronExpression = cronExpression
         self.isEnabled = isEnabled
         self.lastRunTime = lastRunTime
+        self.source = source
+    }
+}
+
+/// Derives a stable UUID from arbitrary text so external crontab entries keep the
+/// same identity across reloads (used for SwiftUI-style diffing and name lookups).
+func deterministicUUID(from string: String) -> UUID {
+    let digest = Insecure.MD5.hash(data: Data(string.utf8))
+    let bytes = [UInt8](digest)
+    return bytes.withUnsafeBufferPointer { NSUUID(uuidBytes: $0.baseAddress!) as UUID }
+}
+
+// MARK: - External Name Store
+
+/// Persists user-assigned display names for cron entries that cmdloop does not
+/// own. Keyed by the entry's cron expression + command so a name survives reloads
+/// without rewriting the user's crontab.
+final class ExternalNameStore {
+    static let shared = ExternalNameStore()
+
+    private var names: [String: String]
+
+    private init() {
+        names = Self.loadFromDisk()
+    }
+
+    private static var url: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/cmd-loop/names.json")
+    }
+
+    static func key(cron: String, command: String) -> String {
+        cron + "\u{1}" + command
+    }
+
+    func name(for key: String) -> String? {
+        names[key]
+    }
+
+    func setName(_ name: String, for key: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            names.removeValue(forKey: key)
+        } else {
+            names[key] = trimmed
+        }
+        persist()
+    }
+
+    private static func loadFromDisk() -> [String: String] {
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+    }
+
+    private func persist() {
+        let dir = Self.url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(names) else { return }
+        try? data.write(to: Self.url, options: .atomic)
     }
 }
 
@@ -141,10 +219,20 @@ class CrontabManager {
                     }
                 }
             } else if !line.isEmpty, !line.hasPrefix("#") {
-                // External cron entry
+                // External cron entry — not owned by cmdloop. Give it a stable id
+                // derived from its content and apply any user-assigned name.
                 let parsed = parseCronLine(line)
                 if !parsed.cron.isEmpty {
-                    jobs.append(CronJob(name: "cronjob", command: parsed.command, cronExpression: parsed.cron, isEnabled: true))
+                    let key = ExternalNameStore.key(cron: parsed.cron, command: parsed.command)
+                    let name = ExternalNameStore.shared.name(for: key) ?? "cronjob"
+                    jobs.append(CronJob(
+                        id: deterministicUUID(from: key),
+                        name: name,
+                        command: parsed.command,
+                        cronExpression: parsed.cron,
+                        isEnabled: true,
+                        source: .external
+                    ))
                 }
             }
             i += 1
@@ -178,6 +266,38 @@ class CrontabManager {
             lines.append("\(job.cronExpression) \(shellLine(for: job))")
         }
 
+        writeCrontab(lines)
+    }
+
+    /// Removes a single external (non-cmdloop) entry from the crontab, leaving all
+    /// cmdloop-managed entries and other external lines intact.
+    func removeExternalEntry(cron: String, command: String) {
+        var lines = readCrontab()
+        var result: [String] = []
+        var skipNext = false
+        var removed = false
+        for line in lines {
+            if line.hasPrefix(marker) {
+                skipNext = true
+                result.append(line)
+                continue
+            }
+            if skipNext {
+                skipNext = false
+                result.append(line)
+                continue
+            }
+            if !removed, !line.isEmpty, !line.hasPrefix("#") {
+                let parsed = parseCronLine(line)
+                if parsed.cron == cron && parsed.command == command {
+                    removed = true
+                    continue
+                }
+            }
+            result.append(line)
+        }
+        while result.last?.isEmpty == true { result.removeLast() }
+        lines = result
         writeCrontab(lines)
     }
 

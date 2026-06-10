@@ -8,8 +8,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             if let img = NSImage(systemSymbolName: "clock.arrow.2.circlepath", accessibilityDescription: "cmdloop") {
-                let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
-                button.image = img.withSymbolConfiguration(config)
+                // Size the symbol to the menu bar's text scale so it matches other
+                // status items, then render it as a template image. Template images
+                // are drawn as vectors at the display's native scale (and tinted for
+                // light/dark menu bars), which keeps the glyph crisp on Retina and
+                // mixed-DPI multi-monitor setups instead of being rasterized once.
+                let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+                let configured = img.withSymbolConfiguration(config) ?? img
+                configured.isTemplate = true
+                button.image = configured
+                button.imageScaling = .scaleProportionallyDown
             }
             button.action = #selector(togglePopover(_:))
             button.target = self
