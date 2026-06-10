@@ -18,7 +18,7 @@ Commands run in a login shell (`$SHELL -l -c`) so your PATH and environment are 
 ## Install
 
 ```bash
-brew tap Gauthierkk/cmdloop
+brew tap gauthierkk/tap
 brew install cmdloop
 ```
 
@@ -42,7 +42,7 @@ cd cmd-loop
 
 ```bash
 brew uninstall cmdloop
-brew untap Gauthierkk/cmdloop
+brew untap gauthierkk/tap
 ```
 
 ## Development
