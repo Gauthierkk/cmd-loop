@@ -8,16 +8,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             if let img = NSImage(systemSymbolName: "clock.arrow.2.circlepath", accessibilityDescription: "cmdloop") {
-                // Size the symbol to the menu bar's text scale so it matches other
-                // status items, then render it as a template image. Template images
-                // are drawn as vectors at the display's native scale (and tinted for
-                // light/dark menu bars), which keeps the glyph crisp on Retina and
-                // mixed-DPI multi-monitor setups instead of being rasterized once.
-                let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-                let configured = img.withSymbolConfiguration(config) ?? img
-                configured.isTemplate = true
-                button.image = configured
-                button.imageScaling = .scaleProportionallyDown
+                // Marking the symbol as a template lets AppKit draw it as a vector
+                // sized to fit the menu bar — crisp on Retina and mixed-DPI setups,
+                // and auto-tinted for light/dark bars. We deliberately do NOT force a
+                // large pointSize: this glyph's repeat-arrows extend above and below
+                // the clock face, so an oversized config makes the top/bottom clip.
+                // Letting the system size it keeps the whole glyph inside the bar.
+                img.isTemplate = true
+                button.image = img
             }
             button.action = #selector(togglePopover(_:))
             button.target = self
@@ -25,13 +23,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let vc = PopoverViewController()
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 420, height: 100)
+        popover.contentSize = NSSize(width: PopoverLayout.width, height: 100)
         popover.behavior = .transient
         popover.contentViewController = vc
         vc.popover = popover
 
         let jobs = ConfigManager.shared.load()
         CrontabManager.shared.sync(jobs)
+        RunLogStore.shared.prune()
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {

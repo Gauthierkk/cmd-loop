@@ -11,6 +11,13 @@ enum JobSource {
     case external
 }
 
+/// Outcome of a job's most recent manual run (cron runs happen outside the app,
+/// so their exit status isn't observable).
+enum RunStatus: String, Codable {
+    case success
+    case failure
+}
+
 struct CronJob: Codable, Identifiable {
     var id: UUID
     var name: String
@@ -18,22 +25,24 @@ struct CronJob: Codable, Identifiable {
     var cronExpression: String
     var isEnabled: Bool
     var lastRunTime: Date?
+    var lastRunStatus: RunStatus?
 
     /// Transient — not persisted. Defaults to `.managed` so decoded config jobs
     /// are always treated as cmdloop-owned.
     var source: JobSource = .managed
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, command, cronExpression, isEnabled, lastRunTime
+        case id, name, command, cronExpression, isEnabled, lastRunTime, lastRunStatus
     }
 
-    init(id: UUID = UUID(), name: String, command: String, cronExpression: String, isEnabled: Bool = true, lastRunTime: Date? = nil, source: JobSource = .managed) {
+    init(id: UUID = UUID(), name: String, command: String, cronExpression: String, isEnabled: Bool = true, lastRunTime: Date? = nil, lastRunStatus: RunStatus? = nil, source: JobSource = .managed) {
         self.id = id
         self.name = name
         self.command = command
         self.cronExpression = cronExpression
         self.isEnabled = isEnabled
         self.lastRunTime = lastRunTime
+        self.lastRunStatus = lastRunStatus
         self.source = source
     }
 }
@@ -193,6 +202,13 @@ class CrontabManager {
 
     private let marker = "# cmdloop:"
 
+    /// Jobs currently executing via "Run now". Main-thread only.
+    private(set) var runningJobIDs: Set<UUID> = []
+
+    /// Most recent manual-run outcome per job this session. Covers external
+    /// jobs, whose status has nowhere to persist. Main-thread only.
+    private(set) var runtimeStatuses: [UUID: RunStatus] = [:]
+
     /// Reads crontab and returns all entries as CronJob objects.
     /// cmdloop-managed entries get their name from config. External entries get "cronjob".
     func loadAllJobs() -> [CronJob] {
@@ -242,6 +258,15 @@ class CrontabManager {
         let activeIds = Set(jobs.compactMap { $0.id })
         for config in configJobs where !config.isEnabled && !activeIds.contains(config.id) {
             jobs.append(config)
+        }
+
+        // Run history is the most accurate last-run source — it includes cron
+        // runs that happened while the app was closed, which config.json misses.
+        for i in jobs.indices {
+            if let latest = RunLogStore.shared.latestRunDate(for: jobs[i]),
+               latest > (jobs[i].lastRunTime ?? .distantPast) {
+                jobs[i].lastRunTime = latest
+            }
         }
 
         return jobs
@@ -301,12 +326,46 @@ class CrontabManager {
         writeCrontab(lines)
     }
 
+    /// Replaces a single external (non-cmdloop) entry's schedule and/or command in
+    /// place, preserving its position and all other entries.
+    func updateExternalEntry(oldCron: String, oldCommand: String, newCron: String, newCommand: String) {
+        let lines = readCrontab()
+        var result: [String] = []
+        var skipNext = false
+        var replaced = false
+        for line in lines {
+            if line.hasPrefix(marker) {
+                skipNext = true
+                result.append(line)
+                continue
+            }
+            if skipNext {
+                skipNext = false
+                result.append(line)
+                continue
+            }
+            if !replaced, !line.isEmpty, !line.hasPrefix("#") {
+                let parsed = parseCronLine(line)
+                if parsed.cron == oldCron && parsed.command == oldCommand {
+                    result.append("\(newCron) \(newCommand)")
+                    replaced = true
+                    continue
+                }
+            }
+            result.append(line)
+        }
+        while result.last?.isEmpty == true { result.removeLast() }
+        writeCrontab(result)
+    }
+
     func runNow(_ job: CronJob, onOutput: ((String) -> Void)? = nil) {
-        let logFile = self.logFileURL(for: job)
-        self.ensureLogFile(logFile)
+        let logFile = RunLogStore.shared.newManualRunFile(for: job)
         let logHandle = try? FileHandle(forWritingTo: logFile)
         logHandle?.seekToEndOfFile()
-        logHandle?.write("\n--- \(Date()) [manual] ---\n".data(using: .utf8)!)
+        logHandle?.write("$ \(job.command)\n".data(using: .utf8)!)
+
+        runningJobIDs.insert(job.id)
+        NotificationCenter.default.post(name: .jobsDidChange, object: nil)
 
         DispatchQueue.global(qos: .utility).async {
             let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -328,8 +387,14 @@ class CrontabManager {
                 }
             }
 
-            try? process.run()
-            process.waitUntilExit()
+            var status = RunStatus.failure
+            do {
+                try process.run()
+                process.waitUntilExit()
+                status = process.terminationStatus == 0 ? .success : .failure
+            } catch {
+                logHandle?.write("cmdloop: failed to launch: \(error)\n".data(using: .utf8)!)
+            }
 
             // Read any remaining data
             pipe.fileHandleForReading.readabilityHandler = nil
@@ -343,11 +408,15 @@ class CrontabManager {
             logHandle?.closeFile()
 
             DispatchQueue.main.async {
+                self.runningJobIDs.remove(job.id)
+                self.runtimeStatuses[job.id] = status
                 var jobs = ConfigManager.shared.load()
                 if let idx = jobs.firstIndex(where: { $0.id == job.id }) {
                     jobs[idx].lastRunTime = Date()
+                    jobs[idx].lastRunStatus = status
                     ConfigManager.shared.save(jobs)
                 }
+                RunLogStore.shared.prune()
                 NotificationCenter.default.post(name: .jobsDidChange, object: nil)
             }
         }
@@ -356,25 +425,19 @@ class CrontabManager {
     // MARK: - Private
 
     private func shellLine(for job: CronJob) -> String {
-        let escaped = job.command.replacingOccurrences(of: "'", with: "'\\''")
-        let logFile = logFileURL(for: job).path
-        return "/bin/zsh -l -c '\(escaped)' >> '\(logFile)' 2>&1"
-    }
-
-    private func logFileURL(for job: CronJob) -> URL {
-        let logDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/cmd-loop/logs")
-        try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
-        let safeName = job.name.lowercased()
-            .replacingOccurrences(of: " ", with: "-")
-            .filter { $0.isLetter || $0.isNumber || $0 == "-" }
-        return logDir.appendingPathComponent("\(safeName)-\(job.id.uuidString).log")
-    }
-
-    private func ensureLogFile(_ url: URL) {
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
+        // A raw newline would split the crontab entry into invalid lines, so
+        // join multi-line commands into one shell statement.
+        let flattened = job.command
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "; ")
+        let escaped = flattened
+            .replacingOccurrences(of: "'", with: "'\\''")
+            // cron treats an unescaped % as end-of-command (rest becomes stdin),
+            // which would truncate the command and lose its output.
+            .replacingOccurrences(of: "%", with: "\\%")
+        return "/bin/zsh -l -c '\(escaped)' \(RunLogStore.shared.cronRedirection(for: job))"
     }
 
     private func readCrontab() -> [String] {

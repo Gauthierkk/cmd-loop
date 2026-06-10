@@ -1,6 +1,31 @@
 import AppKit
 import Foundation
 
+let cmdloopVersion = "1.4.0"
+
+// Handle informational CLI flags before any GUI/daemon work.
+let cliArgs = CommandLine.arguments
+if cliArgs.contains("--version") || cliArgs.contains("-v") {
+    print("cmdloop \(cmdloopVersion)")
+    exit(0)
+}
+if cliArgs.contains("--help") || cliArgs.contains("-h") {
+    print("""
+    cmdloop \(cmdloopVersion) — a minimal macOS menu bar cron manager
+
+    Usage: cmdloop [options]
+
+    Options:
+      -v, --version   Print the version and exit
+      -h, --help      Show this help and exit
+          --daemon    Run in the foreground as the menu bar app (used internally;
+                      cmdloop relaunches itself with this flag)
+
+    Run with no options to launch the menu bar app in the background.
+    """)
+    exit(0)
+}
+
 // If launched without --daemon, re-launch as a detached background process and exit
 if !CommandLine.arguments.contains("--daemon") {
     let execPath = ProcessInfo.processInfo.arguments[0]

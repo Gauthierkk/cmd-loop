@@ -6,17 +6,31 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     private var nameField: NSTextField!
     private var commandTextView: NSTextView!
     private var cronField: NSTextField!
-    private var outputContainer: NSStackView!
-    private var outputTextView: NSTextView!
     private var settingsContainer: NSStackView!
     private var launchAtLoginCheckbox: NSButton!
+    private var retentionField: NSTextField!
+    private var logsContainer: NSStackView!
+    private var logsTitleLabel: NSTextField!
+    private var logsSummaryLabel: NSTextField!
+    private var logsTerminal: TerminalView!
+    private var expandRunsBtn: NSButton!
+    private var runListStack: NSStackView!
+    private var paginationRow: NSStackView!
+    private var pageLabel: NSTextField!
+    private var prevPageBtn: NSButton!
+    private var nextPageBtn: NSButton!
+    private var logsJob: CronJob?
+    private var logsRuns: [RunRecord] = []
+    private var logsPage = 0
+    private var logsExpanded = false
+    private var selectedRunIndex = 0
     private var jobs: [CronJob] = []
     private var editingJob: CronJob?
     private var externalEditHint: NSTextField!
     weak var popover: NSPopover?
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 100))
+        view = NSView(frame: NSRect(x: 0, y: 0, width: PopoverLayout.width, height: 100))
     }
 
     override func viewDidLoad() {
@@ -35,8 +49,8 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         stackView = NSStackView()
         stackView.orientation = .vertical
         stackView.alignment = .centerX
-        stackView.spacing = 1
-        stackView.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 4, right: 0)
+        stackView.spacing = 4
+        stackView.edgeInsets = NSEdgeInsets(top: 10, left: 0, bottom: 8, right: 0)
         stackView.translatesAutoresizingMaskIntoConstraints = false
 
         // Add form (hidden by default)
@@ -85,7 +99,7 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         buttonRow.spacing = 8
 
         // Hint shown when renaming an external (non-cmdloop) cron entry.
-        externalEditHint = NSTextField(labelWithString: "External cron entry — only the name can be changed here.")
+        externalEditHint = NSTextField(labelWithString: "External cron entry — changes are written directly to your crontab.")
         externalEditHint.font = .systemFont(ofSize: 11)
         externalEditHint.textColor = .secondaryLabelColor
         externalEditHint.lineBreakMode = .byWordWrapping
@@ -95,47 +109,10 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         addFormContainer = NSStackView(views: [nameField, externalEditHint, cronField, cmdScroll, buttonRow])
         addFormContainer.orientation = .vertical
         addFormContainer.alignment = .width
-        addFormContainer.spacing = 6
-        addFormContainer.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        addFormContainer.spacing = 10
+        addFormContainer.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
         addFormContainer.isHidden = true
         addFormContainer.translatesAutoresizingMaskIntoConstraints = false
-
-        // Output panel (hidden by default)
-        outputTextView = NSTextView()
-        outputTextView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        outputTextView.isEditable = false
-        outputTextView.isRichText = false
-        outputTextView.backgroundColor = NSColor.black.withAlphaComponent(0.85)
-        outputTextView.textColor = .white
-        outputTextView.textContainerInset = NSSize(width: 6, height: 6)
-
-        let outputScroll = NSScrollView()
-        outputScroll.documentView = outputTextView
-        outputScroll.hasVerticalScroller = true
-        outputScroll.borderType = .noBorder
-        outputScroll.translatesAutoresizingMaskIntoConstraints = false
-        outputScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
-        outputTextView.minSize = NSSize(width: 0, height: 120)
-        outputTextView.isVerticallyResizable = true
-        outputTextView.isHorizontallyResizable = false
-        outputTextView.autoresizingMask = [.width]
-        outputTextView.textContainer?.widthTracksTextView = true
-
-        let closeOutputBtn = NSButton(title: "✕ Close", target: self, action: #selector(hideOutput))
-        closeOutputBtn.bezelStyle = .toolbar
-        closeOutputBtn.font = .systemFont(ofSize: 11)
-
-        let outputHeader = NSStackView(views: [NSView(), closeOutputBtn])
-        outputHeader.orientation = .horizontal
-        outputHeader.spacing = 4
-        outputHeader.edgeInsets = NSEdgeInsets(top: 2, left: 8, bottom: 0, right: 8)
-
-        outputContainer = NSStackView(views: [outputHeader, outputScroll])
-        outputContainer.orientation = .vertical
-        outputContainer.alignment = .width
-        outputContainer.spacing = 0
-        outputContainer.isHidden = true
-        outputContainer.translatesAutoresizingMaskIntoConstraints = false
 
         // Settings panel (hidden by default)
         let settingsTitle = NSTextField(labelWithString: "Settings")
@@ -147,57 +124,149 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         )
         launchAtLoginCheckbox.font = .systemFont(ofSize: 13)
 
+        let clearLogsBtn = NSButton(title: "Clear Logs", target: self, action: #selector(clearLogs))
+        clearLogsBtn.bezelStyle = .rounded
+
         let closeSettingsBtn = NSButton(title: "Done", target: self, action: #selector(hideSettings))
         closeSettingsBtn.bezelStyle = .rounded
 
-        let settingsButtonRow = NSStackView(views: [NSView(), closeSettingsBtn])
+        let settingsButtonRow = NSStackView(views: [clearLogsBtn, NSView(), closeSettingsBtn])
         settingsButtonRow.orientation = .horizontal
         settingsButtonRow.spacing = 8
 
-        settingsContainer = NSStackView(views: [settingsTitle, launchAtLoginCheckbox, settingsButtonRow])
+        // Log retention setting: a run count per job; empty falls back to the
+        // default time-based policy (delete runs older than 10 days).
+        let retentionLabel = NSTextField(labelWithString: "Keep runs per job:")
+        retentionLabel.font = .systemFont(ofSize: 13)
+
+        retentionField = NSTextField()
+        retentionField.placeholderString = "10-day default"
+        retentionField.font = .systemFont(ofSize: 13)
+        retentionField.widthAnchor.constraint(equalToConstant: 100).isActive = true
+
+        let retentionRow = NSStackView(views: [retentionLabel, retentionField])
+        retentionRow.orientation = .horizontal
+        retentionRow.spacing = 8
+
+        let retentionHint = NSTextField(labelWithString: "Number of runs to keep per job. Leave empty to keep runs from the last 10 days.")
+        retentionHint.font = .systemFont(ofSize: 10)
+        retentionHint.textColor = .secondaryLabelColor
+        retentionHint.lineBreakMode = .byWordWrapping
+        retentionHint.maximumNumberOfLines = 2
+        retentionHint.preferredMaxLayoutWidth = 380
+
+        settingsContainer = NSStackView(views: [settingsTitle, launchAtLoginCheckbox, retentionRow, retentionHint, settingsButtonRow])
         settingsContainer.orientation = .vertical
         settingsContainer.alignment = .leading
-        settingsContainer.spacing = 8
-        settingsContainer.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        settingsContainer.spacing = 10
+        settingsContainer.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
         settingsContainer.isHidden = true
         settingsContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        // Logs panel (hidden by default)
+        logsTitleLabel = NSTextField(labelWithString: "")
+        logsTitleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        logsTitleLabel.lineBreakMode = .byTruncatingTail
+
+        let closeLogsBtn = NSButton(title: "✕ Close", target: self, action: #selector(hideLogs))
+        closeLogsBtn.bezelStyle = .toolbar
+        closeLogsBtn.font = .systemFont(ofSize: 11)
+
+        let logsHeader = NSStackView(views: [logsTitleLabel, NSView(), closeLogsBtn])
+        logsHeader.orientation = .horizontal
+        logsHeader.spacing = 4
+        logsHeader.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 0, right: 8)
+
+        logsSummaryLabel = NSTextField(labelWithString: "")
+        logsSummaryLabel.font = .systemFont(ofSize: 11)
+        logsSummaryLabel.textColor = .secondaryLabelColor
+        logsSummaryLabel.lineBreakMode = .byTruncatingTail
+
+        let summaryRow = NSStackView(views: [logsSummaryLabel])
+        summaryRow.orientation = .horizontal
+        summaryRow.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
+
+        logsTerminal = TerminalView()
+
+        expandRunsBtn = NSButton(title: "Show previous runs ▾", target: self, action: #selector(toggleRunList))
+        expandRunsBtn.bezelStyle = .toolbar
+        expandRunsBtn.font = .systemFont(ofSize: 11)
+
+        let expandRow = NSStackView(views: [expandRunsBtn, NSView()])
+        expandRow.orientation = .horizontal
+        expandRow.edgeInsets = NSEdgeInsets(top: 2, left: 12, bottom: 10, right: 12)
+
+        runListStack = NSStackView()
+        runListStack.orientation = .vertical
+        runListStack.alignment = .leading
+        runListStack.spacing = 2
+        runListStack.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 12)
+        runListStack.isHidden = true
+
+        prevPageBtn = NSButton(title: "‹ Prev", target: self, action: #selector(prevPage))
+        prevPageBtn.bezelStyle = .toolbar
+        prevPageBtn.font = .systemFont(ofSize: 11)
+
+        nextPageBtn = NSButton(title: "Next ›", target: self, action: #selector(nextPage))
+        nextPageBtn.bezelStyle = .toolbar
+        nextPageBtn.font = .systemFont(ofSize: 11)
+
+        pageLabel = NSTextField(labelWithString: "")
+        pageLabel.font = .systemFont(ofSize: 11)
+        pageLabel.textColor = .secondaryLabelColor
+
+        paginationRow = NSStackView(views: [prevPageBtn, pageLabel, nextPageBtn, NSView()])
+        paginationRow.orientation = .horizontal
+        paginationRow.spacing = 8
+        paginationRow.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 10, right: 12)
+        paginationRow.isHidden = true
+
+        logsContainer = NSStackView(views: [logsHeader, summaryRow, centeredTerminalRow(logsTerminal), expandRow, runListStack, paginationRow])
+        logsContainer.orientation = .vertical
+        logsContainer.alignment = .width
+        logsContainer.spacing = 8
+        logsContainer.isHidden = true
+        logsContainer.translatesAutoresizingMaskIntoConstraints = false
 
         // Separator
         let separator = NSBox()
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false
 
-        // Add button
-        let addBtn = NSButton(title: "+ Add Command", target: self, action: #selector(showAddForm))
-        addBtn.bezelStyle = .toolbar
-        addBtn.translatesAutoresizingMaskIntoConstraints = false
+        // Footer: icon-only buttons — settings, add, quit.
+        func footerButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
+            let btn = NSButton(title: "", target: self, action: action)
+            btn.bezelStyle = .toolbar
+            btn.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
+            btn.imagePosition = .imageOnly
+            btn.toolTip = tooltip
+            btn.translatesAutoresizingMaskIntoConstraints = false
+            return btn
+        }
 
-        // Quit button
-        let quitBtn = NSButton(title: "Quit", target: self, action: #selector(quitApp))
-        quitBtn.bezelStyle = .toolbar
-        quitBtn.translatesAutoresizingMaskIntoConstraints = false
+        let settingsBtn = footerButton(symbol: "gearshape", tooltip: "Settings", action: #selector(showSettings))
+        let addBtn = footerButton(symbol: "plus", tooltip: "Add command", action: #selector(showAddForm))
+        let quitBtn = footerButton(symbol: "power", tooltip: "Quit cmdloop", action: #selector(quitApp))
 
-        let clearLogsBtn = NSButton(title: "Clear Logs", target: self, action: #selector(clearLogs))
-        clearLogsBtn.bezelStyle = .toolbar
-        clearLogsBtn.translatesAutoresizingMaskIntoConstraints = false
-
-        let settingsBtn = NSButton(title: "", target: self, action: #selector(showSettings))
-        settingsBtn.bezelStyle = .toolbar
-        settingsBtn.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")
-        settingsBtn.imagePosition = .imageOnly
-        settingsBtn.translatesAutoresizingMaskIntoConstraints = false
-
-        let bottomRow = NSStackView(views: [addBtn, clearLogsBtn, settingsBtn, quitBtn])
+        // Flexible equal-width spacers on both ends center the footer buttons.
+        let leftSpacer = NSView()
+        let rightSpacer = NSView()
+        let bottomRow = NSStackView(views: [leftSpacer, settingsBtn, addBtn, quitBtn, rightSpacer])
         bottomRow.orientation = .horizontal
         bottomRow.alignment = .centerY
-        bottomRow.spacing = 12
+        bottomRow.spacing = 16
         bottomRow.translatesAutoresizingMaskIntoConstraints = false
-        bottomRow.edgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 8, right: 12)
+        bottomRow.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 10, right: 14)
+        leftSpacer.widthAnchor.constraint(equalTo: rightSpacer.widthAnchor).isActive = true
 
         // Main layout
-        let mainStack = NSStackView(views: [stackView, outputContainer, addFormContainer, settingsContainer, separator, bottomRow])
+        let mainStack = NSStackView(views: [stackView, logsContainer, addFormContainer, settingsContainer, separator, bottomRow])
         mainStack.orientation = .vertical
         mainStack.spacing = 0
+        // Stretch every section to the stack's full width. The default (.centerX)
+        // gives each panel only its fitting width, which made the two terminal
+        // views render at different sizes depending on their sibling content.
+        mainStack.alignment = .width
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(mainStack)
 
@@ -207,6 +276,34 @@ class PopoverViewController: NSViewController, JobRowDelegate {
             mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
+
+        // Explicitly pin every section — and every row inside the multi-row
+        // panels — to its container's full width. Relying on stack alignment
+        // alone proved flaky inside NSPopover, intermittently leaving panels at
+        // their fitting width and hugging the trailing edge.
+        for section in mainStack.arrangedSubviews {
+            section.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
+        }
+        // (Only the inset-free logs panel: the add form and settings panels have
+        // edge insets, where a full-width pin would conflict.)
+        for row in logsContainer.arrangedSubviews {
+            row.widthAnchor.constraint(equalTo: logsContainer.widthAnchor).isActive = true
+        }
+    }
+
+    /// Wraps a terminal in a full-width row that centers it at the shared
+    /// proportional width (80% of the popover).
+    private func centeredTerminalRow(_ terminal: TerminalView) -> NSView {
+        let wrapper = NSView()
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(terminal)
+        NSLayoutConstraint.activate([
+            terminal.topAnchor.constraint(equalTo: wrapper.topAnchor),
+            terminal.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+            terminal.centerXAnchor.constraint(equalTo: wrapper.centerXAnchor),
+            terminal.widthAnchor.constraint(equalTo: wrapper.widthAnchor, multiplier: PopoverLayout.terminalWidthRatio),
+        ])
+        return wrapper
     }
 
     private func loadJobs() {
@@ -228,6 +325,10 @@ class PopoverViewController: NSViewController, JobRowDelegate {
 
     @objc private func refreshJobs() {
         loadJobs()
+        if let job = logsJob, !logsContainer.isHidden {
+            logsRuns = RunLogStore.shared.runs(for: job)
+            refreshLogsPanel()
+        }
     }
 
     private func rebuildJobList() {
@@ -260,14 +361,14 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     private func resizePopover() {
         view.layoutSubtreeIfNeeded()
         let fittingSize = view.fittingSize
-        let maxHeight: CGFloat = 500
-        let newHeight = min(fittingSize.height, maxHeight)
-        popover?.contentSize = NSSize(width: 420, height: newHeight)
+        let newHeight = min(fittingSize.height, PopoverLayout.maxHeight)
+        popover?.contentSize = NSSize(width: PopoverLayout.width, height: newHeight)
     }
 
     @objc private func showAddForm() {
         editingJob = nil
         settingsContainer.isHidden = true
+        logsContainer.isHidden = true
         addFormContainer.isHidden = false
         nameField.stringValue = ""
         cronField.stringValue = ""
@@ -282,16 +383,17 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     private func showEditForm(for job: CronJob) {
         editingJob = job
         settingsContainer.isHidden = true
+        logsContainer.isHidden = true
         addFormContainer.isHidden = false
         nameField.stringValue = job.name == "cronjob" ? "" : job.name
         cronField.stringValue = job.cronExpression
         commandTextView.string = job.command
         cronField.backgroundColor = .controlBackgroundColor
 
-        // External entries aren't owned by cmdloop, so we don't rewrite their cron
-        // line — only the display name is editable.
+        // External entries are fully editable; saving rewrites their crontab line
+        // directly. Show a note so it's clear the change isn't sandboxed.
         let isExternal = job.source == .external
-        setCommandFieldsEditable(!isExternal)
+        setCommandFieldsEditable(true)
         externalEditHint.isHidden = !isExternal
 
         resizePopover()
@@ -316,12 +418,35 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     @objc private func saveNewJob() {
         let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
 
-        // Renaming an external cron entry: persist the name only, leave the crontab
-        // untouched.
+        // Editing an external cron entry: rewrite its crontab line if the schedule
+        // or command changed, and persist its name.
         if let editing = editingJob, editing.source == .external {
-            guard !name.isEmpty else { return }
-            let key = ExternalNameStore.key(cron: editing.cronExpression, command: editing.command)
-            ExternalNameStore.shared.setName(name, for: key)
+            let command = commandTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cron = cronField.stringValue.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, !command.isEmpty, !cron.isEmpty else { return }
+            guard (try? CronParser(cron)) != nil else {
+                cronField.backgroundColor = NSColor.systemRed.withAlphaComponent(0.15)
+                return
+            }
+
+            if cron != editing.cronExpression || command != editing.command {
+                CrontabManager.shared.updateExternalEntry(
+                    oldCron: editing.cronExpression, oldCommand: editing.command,
+                    newCron: cron, newCommand: command
+                )
+                // Move the stored name to the new content-derived key, and carry
+                // the run history over to the new identity.
+                let oldKey = ExternalNameStore.key(cron: editing.cronExpression, command: editing.command)
+                ExternalNameStore.shared.setName("", for: oldKey)
+                let newKey = ExternalNameStore.key(cron: cron, command: command)
+                RunLogStore.shared.moveHistory(
+                    from: deterministicUUID(from: oldKey),
+                    to: deterministicUUID(from: newKey)
+                )
+            }
+            let newKey = ExternalNameStore.key(cron: cron, command: command)
+            ExternalNameStore.shared.setName(name, for: newKey)
+
             editingJob = nil
             addFormContainer.isHidden = true
             loadJobs()
@@ -356,13 +481,19 @@ class PopoverViewController: NSViewController, JobRowDelegate {
 
     @objc private func showSettings() {
         addFormContainer.isHidden = true
-        outputContainer.isHidden = true
+        logsContainer.isHidden = true
         launchAtLoginCheckbox.state = LoginItemManager.shared.isEnabled ? .on : .off
+        retentionField.stringValue = SettingsStore.shared.logRetentionRuns.map(String.init) ?? ""
         settingsContainer.isHidden = false
         resizePopover()
     }
 
     @objc private func hideSettings() {
+        // Persist retention on Done: a positive run count, or empty for the
+        // default 10-day policy. Prune immediately so the change is visible.
+        let entered = Int(retentionField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
+        SettingsStore.shared.logRetentionRuns = entered > 0 ? entered : nil
+        RunLogStore.shared.prune()
         settingsContainer.isHidden = true
         resizePopover()
     }
@@ -374,12 +505,10 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     }
 
     @objc private func clearLogs() {
-        let logDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/cmd-loop/logs")
-        if let files = try? FileManager.default.contentsOfDirectory(at: logDir, includingPropertiesForKeys: nil) {
-            for file in files where file.pathExtension == "log" {
-                try? FileManager.default.removeItem(at: file)
-            }
+        RunLogStore.shared.clearAll()
+        if logsJob != nil, !logsContainer.isHidden {
+            logsRuns = []
+            refreshLogsPanel()
         }
     }
 
@@ -396,18 +525,117 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     }
 
     func didRunNow(_ job: CronJob) {
-        outputTextView.string = "$ \(job.command)\n"
-        outputContainer.isHidden = false
-        resizePopover()
-        CrontabManager.shared.runNow(job) { [weak self] text in
-            guard let self else { return }
-            self.outputTextView.string += text
-            self.outputTextView.scrollToEndOfDocument(nil)
-        }
+        // Runs silently; output is recorded as a run and viewable via the ☰
+        // logs panel. If that panel is already open for this job, the
+        // jobsDidChange notification refreshes it when the run finishes.
+        CrontabManager.shared.runNow(job)
     }
 
-    @objc private func hideOutput() {
-        outputContainer.isHidden = true
+    // MARK: - Run Logs
+
+    private static let runDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
+    private func relativeString(_ date: Date) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f.localizedString(for: date, relativeTo: Date())
+    }
+
+    func didViewLogs(_ job: CronJob) {
+        logsJob = job
+        logsRuns = RunLogStore.shared.runs(for: job)
+        logsPage = 0
+        logsExpanded = false
+        selectedRunIndex = 0
+        addFormContainer.isHidden = true
+        settingsContainer.isHidden = true
+        logsContainer.isHidden = false
+        refreshLogsPanel()
+    }
+
+    @objc private func hideLogs() {
+        logsContainer.isHidden = true
+        logsJob = nil
+        resizePopover()
+    }
+
+    private func refreshLogsPanel() {
+        guard let job = logsJob else { return }
+        let count = logsRuns.count
+        logsTitleLabel.stringValue = "\(job.name) — \(count) run\(count == 1 ? "" : "s")"
+
+        if logsRuns.isEmpty {
+            logsSummaryLabel.stringValue = "No recorded runs yet"
+            logsTerminal.string = ""
+        } else {
+            selectedRunIndex = min(selectedRunIndex, count - 1)
+            let last = logsRuns[0]
+            let viewing = logsRuns[selectedRunIndex]
+            var summary = "Last run \(relativeString(last.date))\(last.isManual ? " (manual)" : "")"
+            if selectedRunIndex != 0 {
+                summary += " · viewing \(Self.runDateFormatter.string(from: viewing.date))"
+            }
+            logsSummaryLabel.stringValue = summary
+            logsTerminal.string = (try? String(contentsOf: viewing.url, encoding: .utf8)) ?? "(could not read log)"
+        }
+
+        expandRunsBtn.isHidden = count <= 1
+        expandRunsBtn.title = logsExpanded ? "Hide previous runs ▴" : "Show previous runs ▾"
+        rebuildRunList()
+        resizePopover()
+    }
+
+    private func rebuildRunList() {
+        runListStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let pageSize = 10
+        let pageCount = max(1, (logsRuns.count + pageSize - 1) / pageSize)
+        logsPage = min(logsPage, pageCount - 1)
+        runListStack.isHidden = !logsExpanded
+        paginationRow.isHidden = !logsExpanded || pageCount <= 1
+        guard logsExpanded else { return }
+
+        let start = logsPage * pageSize
+        let end = min(start + pageSize, logsRuns.count)
+        for i in start..<end {
+            let run = logsRuns[i]
+            let title = "\(Self.runDateFormatter.string(from: run.date))\(run.isManual ? "  (manual)" : "")"
+            let btn = NSButton(title: title, target: self, action: #selector(selectRun(_:)))
+            btn.bezelStyle = .inline
+            btn.isBordered = false
+            btn.tag = i
+            btn.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            btn.contentTintColor = i == selectedRunIndex ? .controlAccentColor : .labelColor
+            runListStack.addArrangedSubview(btn)
+        }
+        pageLabel.stringValue = "Page \(logsPage + 1) of \(pageCount)"
+        prevPageBtn.isEnabled = logsPage > 0
+        nextPageBtn.isEnabled = logsPage < pageCount - 1
+    }
+
+    @objc private func selectRun(_ sender: NSButton) {
+        selectedRunIndex = sender.tag
+        refreshLogsPanel()
+    }
+
+    @objc private func toggleRunList() {
+        logsExpanded.toggle()
+        refreshLogsPanel()
+    }
+
+    @objc private func prevPage() {
+        logsPage -= 1
+        rebuildRunList()
+        resizePopover()
+    }
+
+    @objc private func nextPage() {
+        logsPage += 1
+        rebuildRunList()
         resizePopover()
     }
 
