@@ -1,15 +1,16 @@
 # cmdloop
 
-A minimal macOS menu bar app for managing cron jobs. No dock icon, no window — just a popover from the menu bar.
+A minimal macOS menu bar app for managing scheduled commands via **cron or launchd**. No dock icon, no window — just a popover from the menu bar.
 
 ## How it works
 
-**Your system crontab is the single source of truth.** cmdloop is a GUI frontend for `crontab -l` / `crontab -`. It reads, writes, and displays entries directly from your crontab.
+**Your local schedulers are the single source of truth.** cmdloop is a GUI frontend over both your crontab (`crontab -l` / `crontab -`) and your launchd agents (`~/Library/LaunchAgents` + `launchctl`). When you add a command you pick the backend; both remain the source of truth and both keep running when cmdloop is closed.
 
-- Jobs created in cmdloop are tagged with a comment marker (`# cmdloop:<uuid>`) so the app can track them
-- External cron entries (added via terminal) show up in the UI as "cronjob" — you can give them a friendly name, edit their schedule/command, run them, or delete them. Names are stored separately; editing the schedule or command rewrites that crontab line in place
-- Disabling a job removes it from the crontab; enabling adds it back
-- Jobs run via cron even if cmdloop isn't open
+- When adding a command, choose **Cron** (a 5-field cron expression) or **Launchd** (native calendar fields, or an "every N minutes/seconds" interval)
+- Cron jobs created in cmdloop are tagged with a comment marker (`# cmdloop:<uuid>`); launchd jobs are written as `com.cmdloop.<uuid>.plist` LaunchAgents
+- External cron entries (added via terminal) show up as "cronjob"; external launchd agents in `~/Library/LaunchAgents` show up as "launchd job" (common system/Homebrew agents are filtered out). Either can be renamed, edited, run, or deleted; editing rewrites the underlying crontab line or plist in place
+- Disabling a job removes it from the crontab / unloads and removes its plist; enabling adds it back
+- Jobs run via cron or launchd even if cmdloop isn't open
 
 Job metadata (names, last run times) is stored in `~/.config/cmd-loop/config.json`. Each run writes its own log file under `~/.config/cmd-loop/logs/<job-uuid>/`, so run history works even when the app is closed. By default runs older than 10 days are deleted; in Settings you can instead keep a fixed number of runs per job.
 
@@ -56,7 +57,7 @@ swift run cmdloop
 
 Click the **⏲** icon in your menu bar to open the popover.
 
-Each job row shows a toggle, a status dot, the job name, its cron schedule, and the last run time. The status dot pulses green while a run is in progress, turns solid green after a clean exit, red after a failure, and stays dark until the job's first run.
+Each job row shows a toggle, a status dot, the job name, a `cron`/`launchd` tag, its schedule, and the last run time. The status dot pulses green while a run is in progress, turns solid green after a clean exit, red after a failure, and stays dark until the job's first run.
 
 Per-job actions:
 
@@ -68,7 +69,7 @@ Per-job actions:
 Footer:
 
 - **⚙ Settings** — start at login, log retention (number of runs per job; default keeps 10 days), and Clear Logs
-- **+** — add a command: name, cron expression (e.g. `0 8 * * *`), and shell command (multi-line allowed)
+- **+** — add a command: name, backend (Cron or Launchd), schedule (a cron expression like `0 8 * * *`, or launchd calendar/interval fields), and shell command (multi-line allowed)
 - **⏻** — quit cmdloop (scheduled jobs keep running via cron)
 
 ## CLI

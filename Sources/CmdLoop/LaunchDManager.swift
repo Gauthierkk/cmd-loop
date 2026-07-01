@@ -1,0 +1,297 @@
+import Foundation
+
+/// A reference to an on-disk external LaunchAgent, so operations (enable, edit,
+/// delete) can find the plist a displayed job came from.
+struct ExternalAgentRef {
+    let url: URL
+    let label: String
+}
+
+/// Owns the launchd backend: generating/parsing LaunchAgent plists, translating
+/// schedules to/from launchd keys, and loading/unloading agents via launchctl.
+/// The crontab equivalent lives in `CrontabManager`; `SchedulerManager` routes
+/// between the two.
+final class LaunchDManager {
+    static let shared = LaunchDManager()
+    private init() {}
+
+    private let labelPrefix = "com.cmdloop."
+
+    /// Label prefixes we never surface as adoptable "external" jobs: cmdloop's own
+    /// managed agents (tracked via config instead) and common third-party noise.
+    private let noisePrefixes = [
+        "com.cmdloop.",
+        "com.apple.",
+        "homebrew.mxcl.",
+        "com.microsoft.",
+        "com.google.",
+        "org.mongodb.",
+        "com.docker.",
+        "com.adobe.",
+        "com.valvesoftware.",
+        "com.logi.",
+    ]
+
+    /// Maps a displayed external job's id back to its plist file + label.
+    /// Rebuilt on each `loadExternalJobs()`. Main-thread only.
+    private(set) var externalAgents: [UUID: ExternalAgentRef] = [:]
+
+    var agentsDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents")
+    }
+
+    func label(for job: CronJob) -> String { labelPrefix + job.id.uuidString }
+
+    func plistURL(for job: CronJob) -> URL {
+        agentsDirectory.appendingPathComponent(label(for: job) + ".plist")
+    }
+
+    func isNoiseLabel(_ label: String) -> Bool {
+        noisePrefixes.contains { label.hasPrefix($0) }
+    }
+
+    /// Whether a schedule round-trips through the launchd schedule editor. An
+    /// agent with multiple calendar intervals can't be represented by the
+    /// single-interval editor, so the UI shows it read-only.
+    func isEditableSchedule(_ schedule: JobSchedule) -> Bool {
+        if case .calendar(let intervals) = schedule, intervals.count > 1 { return false }
+        return true
+    }
+
+    // MARK: - Schedule translation
+
+    /// launchd schedule keys (`StartInterval` / `StartCalendarInterval`) for a
+    /// schedule. Empty for `.cron` (which never reaches the launchd backend).
+    func scheduleDict(for schedule: JobSchedule) -> [String: Any] {
+        switch schedule {
+        case .cron:
+            return [:]
+        case .interval(let seconds):
+            return ["StartInterval": seconds]
+        case .calendar(let intervals):
+            let dicts = intervals.map(calendarDict)
+            // launchd accepts a single dict or an array of dicts.
+            return ["StartCalendarInterval": dicts.count == 1 ? dicts[0] : dicts]
+        }
+    }
+
+    func schedule(fromPlist dict: [String: Any]) -> JobSchedule? {
+        if let seconds = dict["StartInterval"] as? Int {
+            return .interval(seconds)
+        }
+        if let one = dict["StartCalendarInterval"] as? [String: Any] {
+            return .calendar([calendarInterval(from: one)])
+        }
+        if let many = dict["StartCalendarInterval"] as? [[String: Any]] {
+            return .calendar(many.map(calendarInterval(from:)))
+        }
+        return nil
+    }
+
+    private func calendarDict(_ i: CalendarInterval) -> [String: Int] {
+        var d: [String: Int] = [:]
+        if let v = i.minute { d["Minute"] = v }
+        if let v = i.hour { d["Hour"] = v }
+        if let v = i.day { d["Day"] = v }
+        if let v = i.weekday { d["Weekday"] = v }
+        if let v = i.month { d["Month"] = v }
+        return d
+    }
+
+    private func calendarInterval(from dict: [String: Any]) -> CalendarInterval {
+        CalendarInterval(
+            minute: dict["Minute"] as? Int,
+            hour: dict["Hour"] as? Int,
+            day: dict["Day"] as? Int,
+            weekday: dict["Weekday"] as? Int,
+            month: dict["Month"] as? Int
+        )
+    }
+
+    // MARK: - Plist generation (managed jobs)
+
+    func plistDictionary(for job: CronJob) -> [String: Any] {
+        var dict: [String: Any] = [:]
+        dict["Label"] = label(for: job)
+        dict["ProgramArguments"] = ["/bin/zsh", "-l", "-c", wrappedCommand(for: job)]
+        for (key, value) in scheduleDict(for: job.schedule) {
+            dict[key] = value
+        }
+        return dict
+    }
+
+    func plistContent(for job: CronJob) -> String {
+        let dict = plistDictionary(for: job)
+        guard let data = try? PropertyListSerialization.data(
+            fromPropertyList: dict, format: .xml, options: 0
+        ) else { return "" }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    /// Wraps the user's command so each launchd fire writes its own run-log file,
+    /// matching cron's per-run history. Unlike cron, launchd needs no `%` escaping.
+    private func wrappedCommand(for job: CronJob) -> String {
+        let flattened = job.command
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "; ")
+        return "\(flattened) \(RunLogStore.shared.launchdRedirection(for: job))"
+    }
+
+    // MARK: - External agent discovery
+
+    func plistDict(at url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let dict = obj as? [String: Any] else { return nil }
+        return dict
+    }
+
+    /// Scans `~/Library/LaunchAgents`, skipping cmdloop-managed and noise labels,
+    /// and returns the remaining agents as external jobs.
+    func loadExternalJobs() -> [CronJob] {
+        externalAgents = [:]
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: agentsDirectory, includingPropertiesForKeys: nil
+        ) else { return [] }
+
+        var jobs: [CronJob] = []
+        for file in files where file.pathExtension == "plist" {
+            guard let dict = plistDict(at: file) else { continue }
+            let label = (dict["Label"] as? String) ?? file.deletingPathExtension().lastPathComponent
+            if isNoiseLabel(label) { continue }
+            guard let job = externalJob(fromPlist: dict, fallbackLabel: label) else { continue }
+            externalAgents[job.id] = ExternalAgentRef(url: file, label: label)
+            jobs.append(job)
+        }
+        return jobs
+    }
+
+    /// Builds an external job from a parsed plist. Returns nil for agents with no
+    /// schedule or no command (e.g. socket/RunAtLoad-only agents) — cmdloop only
+    /// surfaces scheduled command jobs.
+    func externalJob(fromPlist dict: [String: Any], fallbackLabel: String) -> CronJob? {
+        guard let schedule = schedule(fromPlist: dict) else { return nil }
+        let command = commandFromProgramArguments(dict)
+        guard !command.isEmpty else { return nil }
+
+        let label = (dict["Label"] as? String) ?? fallbackLabel
+        // Identity is anchored on the label (stable across schedule/command edits),
+        // so run history isn't orphaned when a user edits an external agent.
+        let key = "launchd:" + label
+        let name = ExternalNameStore.shared.name(for: key) ?? "launchd job"
+        return CronJob(
+            id: deterministicUUID(from: key),
+            name: name,
+            command: command,
+            schedule: schedule,
+            backend: .launchd,
+            isEnabled: true,
+            source: .external
+        )
+    }
+
+    /// Stable name-store key for an external launchd job (label-based).
+    func externalNameKey(label: String) -> String { "launchd:" + label }
+
+    private func commandFromProgramArguments(_ dict: [String: Any]) -> String {
+        guard let args = dict["ProgramArguments"] as? [String], !args.isEmpty else { return "" }
+        // Unwrap the "<shell> -l -c <command>" form we (and many agents) use.
+        if let first = args.first, isShellPath(first),
+           let ci = args.firstIndex(of: "-c"), ci + 1 < args.count {
+            return args[(ci + 1)...].joined(separator: " ")
+        }
+        return args.joined(separator: " ")
+    }
+
+    private func isShellPath(_ path: String) -> Bool {
+        ["zsh", "bash", "sh", "fish"].contains((path as NSString).lastPathComponent)
+    }
+
+    // MARK: - launchctl operations
+
+    private var domainTarget: String { "gui/\(getuid())" }
+
+    /// Reconciles managed launchd jobs at launch: enabled ones get written and
+    /// loaded, disabled ones get unloaded and their plist removed (mirroring how
+    /// cron drops disabled jobs from the crontab but keeps them in config).
+    func syncManaged(_ jobs: [CronJob]) {
+        for job in jobs where job.backend == .launchd && job.source == .managed {
+            if job.isEnabled {
+                writeAndLoad(job)
+            } else {
+                unloadAndRemove(job)
+            }
+        }
+    }
+
+    func enable(_ job: CronJob) { writeAndLoad(job) }
+    func disable(_ job: CronJob) { unloadAndRemove(job) }
+    func remove(_ job: CronJob) { unloadAndRemove(job) }
+
+    private func writeAndLoad(_ job: CronJob) {
+        let url = plistURL(for: job)
+        try? FileManager.default.createDirectory(at: agentsDirectory, withIntermediateDirectories: true)
+        try? plistContent(for: job).data(using: .utf8)?.write(to: url, options: .atomic)
+        bootout(label: label(for: job)) // clear any stale registration first
+        bootstrap(plistPath: url.path)
+    }
+
+    private func unloadAndRemove(_ job: CronJob) {
+        bootout(label: label(for: job))
+        try? FileManager.default.removeItem(at: plistURL(for: job))
+    }
+
+    // MARK: External agent operations (keep the plist file unless deleting)
+
+    func setExternalEnabled(_ enabled: Bool, ref: ExternalAgentRef) {
+        if enabled {
+            bootstrap(plistPath: ref.url.path)
+        } else {
+            bootout(label: ref.label)
+        }
+    }
+
+    func removeExternalAgent(ref: ExternalAgentRef) {
+        bootout(label: ref.label)
+        try? FileManager.default.removeItem(at: ref.url)
+    }
+
+    /// Rewrites an external agent's command and schedule in place, preserving all
+    /// other keys (EnvironmentVariables, WorkingDirectory, etc.).
+    func updateExternalAgent(ref: ExternalAgentRef, command: String, schedule: JobSchedule) {
+        guard var dict = plistDict(at: ref.url) else { return }
+        dict["ProgramArguments"] = ["/bin/zsh", "-l", "-c", command]
+        dict.removeValue(forKey: "StartInterval")
+        dict.removeValue(forKey: "StartCalendarInterval")
+        for (key, value) in scheduleDict(for: schedule) { dict[key] = value }
+        guard let data = try? PropertyListSerialization.data(
+            fromPropertyList: dict, format: .xml, options: 0
+        ) else { return }
+        try? data.write(to: ref.url, options: .atomic)
+        bootout(label: ref.label)
+        bootstrap(plistPath: ref.url.path)
+    }
+
+    private func bootstrap(plistPath: String) {
+        runLaunchctl(["bootstrap", domainTarget, plistPath])
+    }
+
+    private func bootout(label: String) {
+        runLaunchctl(["bootout", "\(domainTarget)/\(label)"])
+    }
+
+    @discardableResult
+    private func runLaunchctl(_ args: [String]) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = args
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+        return process.terminationStatus
+    }
+}

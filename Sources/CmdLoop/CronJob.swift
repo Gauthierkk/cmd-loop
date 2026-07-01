@@ -18,11 +18,100 @@ enum RunStatus: String, Codable {
     case failure
 }
 
+/// Which local scheduler runs a job. Both are treated as sources of truth:
+/// cron jobs live in the crontab, launchd jobs live in `~/Library/LaunchAgents`.
+enum JobBackend: String, Codable {
+    case cron
+    case launchd
+}
+
+/// A job's schedule. Cron jobs carry a 5-field expression; launchd jobs carry
+/// either a set of calendar intervals (`StartCalendarInterval`) or a plain
+/// seconds interval (`StartInterval`).
+enum JobSchedule: Codable, Equatable {
+    case cron(String)
+    case calendar([CalendarInterval])
+    case interval(Int)
+
+    private enum CodingKeys: String, CodingKey { case type, expression, intervals, seconds }
+    private enum Kind: String, Codable { case cron, calendar, interval }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(Kind.self, forKey: .type) {
+        case .cron:     self = .cron(try c.decode(String.self, forKey: .expression))
+        case .calendar: self = .calendar(try c.decode([CalendarInterval].self, forKey: .intervals))
+        case .interval: self = .interval(try c.decode(Int.self, forKey: .seconds))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .cron(let e):
+            try c.encode(Kind.cron, forKey: .type)
+            try c.encode(e, forKey: .expression)
+        case .calendar(let intervals):
+            try c.encode(Kind.calendar, forKey: .type)
+            try c.encode(intervals, forKey: .intervals)
+        case .interval(let seconds):
+            try c.encode(Kind.interval, forKey: .type)
+            try c.encode(seconds, forKey: .seconds)
+        }
+    }
+}
+
+extension JobSchedule {
+    /// Compact, human-readable summary shown in the job row.
+    var displaySummary: String {
+        switch self {
+        case .cron(let expr):
+            return expr
+        case .interval(let seconds):
+            if seconds % 3600 == 0 { return "every \(seconds / 3600)h" }
+            if seconds % 60 == 0 { return "every \(seconds / 60) min" }
+            return "every \(seconds)s"
+        case .calendar(let intervals):
+            return intervals.map { $0.cronLikeSummary }.joined(separator: " | ")
+        }
+    }
+}
+
+/// One launchd `StartCalendarInterval` dictionary. A nil field means "every"
+/// (that field is omitted from the plist, so launchd matches all values).
+struct CalendarInterval: Codable, Equatable {
+    var minute: Int?
+    var hour: Int?
+    var day: Int?
+    var weekday: Int?
+    var month: Int?
+
+    init(minute: Int? = nil, hour: Int? = nil, day: Int? = nil, weekday: Int? = nil, month: Int? = nil) {
+        self.minute = minute
+        self.hour = hour
+        self.day = day
+        self.weekday = weekday
+        self.month = month
+    }
+
+    var isEmpty: Bool {
+        minute == nil && hour == nil && day == nil && weekday == nil && month == nil
+    }
+
+    /// A cron-style rendering (minute hour day month weekday), with "*" for the
+    /// "every" fields. Familiar and compact for display.
+    var cronLikeSummary: String {
+        func f(_ v: Int?) -> String { v.map(String.init) ?? "*" }
+        return "\(f(minute)) \(f(hour)) \(f(day)) \(f(month)) \(f(weekday))"
+    }
+}
+
 struct CronJob: Codable, Identifiable {
     var id: UUID
     var name: String
     var command: String
-    var cronExpression: String
+    var schedule: JobSchedule
+    var backend: JobBackend
     var isEnabled: Bool
     var lastRunTime: Date?
     var lastRunStatus: RunStatus?
@@ -31,19 +120,65 @@ struct CronJob: Codable, Identifiable {
     /// are always treated as cmdloop-owned.
     var source: JobSource = .managed
 
-    private enum CodingKeys: String, CodingKey {
-        case id, name, command, cronExpression, isEnabled, lastRunTime, lastRunStatus
+    /// The cron expression for cron-backed jobs; empty for launchd jobs.
+    /// Convenience for cron-only code paths and display.
+    var cronExpression: String {
+        if case .cron(let expr) = schedule { return expr }
+        return ""
     }
 
-    init(id: UUID = UUID(), name: String, command: String, cronExpression: String, isEnabled: Bool = true, lastRunTime: Date? = nil, lastRunStatus: RunStatus? = nil, source: JobSource = .managed) {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, command, schedule, backend, isEnabled, lastRunTime, lastRunStatus
+        case cronExpression // legacy field, read-only for migration
+    }
+
+    init(id: UUID = UUID(), name: String, command: String, schedule: JobSchedule, backend: JobBackend = .cron, isEnabled: Bool = true, lastRunTime: Date? = nil, lastRunStatus: RunStatus? = nil, source: JobSource = .managed) {
         self.id = id
         self.name = name
         self.command = command
-        self.cronExpression = cronExpression
+        self.schedule = schedule
+        self.backend = backend
         self.isEnabled = isEnabled
         self.lastRunTime = lastRunTime
         self.lastRunStatus = lastRunStatus
         self.source = source
+    }
+
+    /// Convenience initializer for cron-backed jobs, keeping existing cron call
+    /// sites and tests unchanged.
+    init(id: UUID = UUID(), name: String, command: String, cronExpression: String, isEnabled: Bool = true, lastRunTime: Date? = nil, lastRunStatus: RunStatus? = nil, source: JobSource = .managed) {
+        self.init(id: id, name: name, command: command, schedule: .cron(cronExpression), backend: .cron, isEnabled: isEnabled, lastRunTime: lastRunTime, lastRunStatus: lastRunStatus, source: source)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        command = try c.decode(String.self, forKey: .command)
+        if let sched = try c.decodeIfPresent(JobSchedule.self, forKey: .schedule) {
+            schedule = sched
+        } else {
+            // Legacy config: a bare `cronExpression` string, cron backend.
+            let expr = try c.decodeIfPresent(String.self, forKey: .cronExpression) ?? ""
+            schedule = .cron(expr)
+        }
+        backend = try c.decodeIfPresent(JobBackend.self, forKey: .backend) ?? .cron
+        isEnabled = try c.decode(Bool.self, forKey: .isEnabled)
+        lastRunTime = try c.decodeIfPresent(Date.self, forKey: .lastRunTime)
+        lastRunStatus = try c.decodeIfPresent(RunStatus.self, forKey: .lastRunStatus)
+        source = .managed
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(command, forKey: .command)
+        try c.encode(schedule, forKey: .schedule)
+        try c.encode(backend, forKey: .backend)
+        try c.encode(isEnabled, forKey: .isEnabled)
+        try c.encodeIfPresent(lastRunTime, forKey: .lastRunTime)
+        try c.encodeIfPresent(lastRunStatus, forKey: .lastRunStatus)
     }
 }
 
@@ -285,8 +420,8 @@ class CrontabManager {
         var lines = readCrontab()
         lines = filterOutCmdloopEntries(lines)
 
-        // Add enabled jobs
-        for job in jobs where job.isEnabled {
+        // Add enabled cron-backed jobs (launchd jobs are handled by LaunchDManager)
+        for job in jobs where job.isEnabled && job.backend == .cron {
             lines.append("\(marker)\(job.id.uuidString)")
             lines.append("\(job.cronExpression) \(shellLine(for: job))")
         }

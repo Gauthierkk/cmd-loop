@@ -32,7 +32,9 @@ class JobRowView: NSView {
         // tracked. Renaming, running, and deleting still work.
         if job.source == .external {
             toggle.isEnabled = false
-            toggle.toolTip = "External cron entry — enable/disable is managed in your crontab"
+            toggle.toolTip = job.backend == .launchd
+                ? "External launchd agent — enable/disable is managed in ~/Library/LaunchAgents"
+                : "External cron entry — enable/disable is managed in your crontab"
         }
 
         // Status dot: blackish when the job has never run this session, pulsing
@@ -78,7 +80,16 @@ class JobRowView: NSView {
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
-        let cronLabel = NSTextField(labelWithString: job.cronExpression)
+        // Small tag showing which local scheduler runs the job.
+        let backendTag = NSTextField(labelWithString: job.backend == .launchd ? "launchd" : "cron")
+        backendTag.textColor = .tertiaryLabelColor
+        backendTag.font = .systemFont(ofSize: 9, weight: .medium)
+        backendTag.alignment = .center
+        backendTag.lineBreakMode = .byClipping
+        backendTag.toolTip = job.backend == .launchd ? "Runs via launchd" : "Runs via cron"
+        backendTag.widthAnchor.constraint(equalToConstant: 44).isActive = true
+
+        let cronLabel = NSTextField(labelWithString: job.schedule.displaySummary)
         cronLabel.textColor = .secondaryLabelColor
         cronLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         cronLabel.lineBreakMode = .byTruncatingTail
@@ -115,13 +126,14 @@ class JobRowView: NSView {
         let editBtn = actionButton("✎", size: 13, tooltip: "Edit", action: #selector(editPressed))
         let deleteBtn = actionButton("✕", size: 12, tooltip: "Delete", action: #selector(deletePressed))
 
-        let hStack = NSStackView(views: [toggle, dot, nameLabel, cronLabel, lastRunLabel, runBtn, logsBtn, editBtn, deleteBtn])
+        let hStack = NSStackView(views: [toggle, dot, nameLabel, backendTag, cronLabel, lastRunLabel, runBtn, logsBtn, editBtn, deleteBtn])
         hStack.orientation = .horizontal
         hStack.alignment = .centerY
         hStack.spacing = 8
         hStack.setCustomSpacing(10, after: toggle)
         hStack.setCustomSpacing(10, after: dot)
-        hStack.setCustomSpacing(12, after: nameLabel)
+        hStack.setCustomSpacing(10, after: nameLabel)
+        hStack.setCustomSpacing(8, after: backendTag)
         hStack.setCustomSpacing(12, after: cronLabel)
         hStack.setCustomSpacing(12, after: lastRunLabel)
         hStack.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)

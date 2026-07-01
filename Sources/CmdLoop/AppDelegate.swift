@@ -29,7 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         vc.popover = popover
 
         let jobs = ConfigManager.shared.load()
-        CrontabManager.shared.sync(jobs)
+        SchedulerManager.shared.syncManaged(jobs)
         RunLogStore.shared.prune()
     }
 

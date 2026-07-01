@@ -65,6 +65,14 @@ final class RunLogStore {
         return ">> '\(dir.path)'/run-$(date +\\%Y-\\%m-\\%dT\\%H-\\%M-\\%S).log 2>&1"
     }
 
+    /// launchd redirection for scheduled runs: like `cronRedirection` but without
+    /// the `%` escaping, since launchd passes the command string to the shell
+    /// verbatim (there is no crontab `%` termination rule to work around).
+    func launchdRedirection(for job: CronJob) -> String {
+        let dir = ensureDirectory(for: job)
+        return ">> '\(dir.path)'/run-$(date +%Y-%m-%dT%H-%M-%S).log 2>&1"
+    }
+
     func newManualRunFile(for job: CronJob) -> URL {
         let dir = ensureDirectory(for: job)
         let name = "run-\(Self.timestampFormatter.string(from: Date()))-manual.log"

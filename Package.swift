@@ -5,6 +5,7 @@ let package = Package(
     name: "cmdloop",
     platforms: [.macOS(.v13)],
     targets: [
-        .executableTarget(name: "cmdloop", path: "Sources/CmdLoop")
+        .executableTarget(name: "cmdloop", path: "Sources/CmdLoop"),
+        .testTarget(name: "cmdloopTests", dependencies: ["cmdloop"])
     ]
 )
