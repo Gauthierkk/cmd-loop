@@ -5,16 +5,19 @@ protocol JobRowDelegate: AnyObject {
     func didRunNow(_ job: CronJob)
     func didEditJob(_ job: CronJob)
     func didDeleteJob(_ job: CronJob)
-    func didViewLogs(_ job: CronJob)
+    func didToggleDetail(_ job: CronJob)
 }
 
 class JobRowView: NSView {
     private let job: CronJob
     private weak var delegate: JobRowDelegate?
+    /// Whether this job's detail panel is currently open (highlights the ☰ button).
+    private let isDetailOpen: Bool
 
-    init(job: CronJob, delegate: JobRowDelegate) {
+    init(job: CronJob, delegate: JobRowDelegate, isDetailOpen: Bool = false) {
         self.job = job
         self.delegate = delegate
+        self.isDetailOpen = isDetailOpen
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         setupUI()
@@ -80,21 +83,6 @@ class JobRowView: NSView {
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
-        // Small tag showing which local scheduler runs the job.
-        let backendTag = NSTextField(labelWithString: job.backend == .launchd ? "launchd" : "cron")
-        backendTag.textColor = .tertiaryLabelColor
-        backendTag.font = .systemFont(ofSize: 9, weight: .medium)
-        backendTag.alignment = .center
-        backendTag.lineBreakMode = .byClipping
-        backendTag.toolTip = job.backend == .launchd ? "Runs via launchd" : "Runs via cron"
-        backendTag.widthAnchor.constraint(equalToConstant: 44).isActive = true
-
-        let cronLabel = NSTextField(labelWithString: job.schedule.displaySummary)
-        cronLabel.textColor = .secondaryLabelColor
-        cronLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        cronLabel.lineBreakMode = .byTruncatingTail
-        cronLabel.widthAnchor.constraint(equalToConstant: 90).isActive = true
-
         let lastRun: String
         if let time = job.lastRunTime {
             let formatter = RelativeDateTimeFormatter()
@@ -122,19 +110,21 @@ class JobRowView: NSView {
         }
 
         let runBtn = actionButton("▶", size: 10, tooltip: "Run now", action: #selector(runNowPressed))
-        let logsBtn = actionButton("☰", size: 12, tooltip: "View run logs", action: #selector(logsPressed))
-        let editBtn = actionButton("✎", size: 13, tooltip: "Edit", action: #selector(editPressed))
+        let detailBtn = actionButton("☰", size: 12, tooltip: "Details & run logs", action: #selector(detailPressed))
+        // Highlight the ☰ button while its detail panel is open.
+        if isDetailOpen {
+            detailBtn.contentTintColor = .controlAccentColor
+            detailBtn.font = .boldSystemFont(ofSize: 13)
+        }
         let deleteBtn = actionButton("✕", size: 12, tooltip: "Delete", action: #selector(deletePressed))
 
-        let hStack = NSStackView(views: [toggle, dot, nameLabel, backendTag, cronLabel, lastRunLabel, runBtn, logsBtn, editBtn, deleteBtn])
+        let hStack = NSStackView(views: [toggle, dot, nameLabel, lastRunLabel, runBtn, detailBtn, deleteBtn])
         hStack.orientation = .horizontal
         hStack.alignment = .centerY
         hStack.spacing = 8
         hStack.setCustomSpacing(10, after: toggle)
         hStack.setCustomSpacing(10, after: dot)
-        hStack.setCustomSpacing(10, after: nameLabel)
-        hStack.setCustomSpacing(8, after: backendTag)
-        hStack.setCustomSpacing(12, after: cronLabel)
+        hStack.setCustomSpacing(12, after: nameLabel)
         hStack.setCustomSpacing(12, after: lastRunLabel)
         hStack.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
         hStack.translatesAutoresizingMaskIntoConstraints = false
@@ -156,12 +146,8 @@ class JobRowView: NSView {
         delegate?.didRunNow(job)
     }
 
-    @objc private func logsPressed() {
-        delegate?.didViewLogs(job)
-    }
-
-    @objc private func editPressed() {
-        delegate?.didEditJob(job)
+    @objc private func detailPressed() {
+        delegate?.didToggleDetail(job)
     }
 
     @objc private func deletePressed() {

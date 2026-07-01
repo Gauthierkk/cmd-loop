@@ -1,6 +1,6 @@
 import AppKit
 
-class PopoverViewController: NSViewController, JobRowDelegate {
+class PopoverViewController: NSViewController, JobRowDelegate, NSTextFieldDelegate {
     private var stackView: NSStackView!
     private var addFormContainer: NSStackView!
     private var nameField: NSTextField!
@@ -18,9 +18,10 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     private var editingScheduleReadOnly = false
     private var settingsContainer: NSStackView!
     private var launchAtLoginCheckbox: NSButton!
-    private var retentionField: NSTextField!
+    private var retentionPopup: NSPopUpButton!
     private var logsContainer: NSStackView!
     private var logsTitleLabel: NSTextField!
+    private var logsFreqLabel: NSTextField!
     private var logsSummaryLabel: NSTextField!
     private var logsTerminal: TerminalView!
     private var expandRunsBtn: NSButton!
@@ -67,6 +68,7 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         nameField = NSTextField()
         nameField.placeholderString = "Name"
         nameField.font = .systemFont(ofSize: 14)
+        nameField.delegate = self // enforces the name-length cap
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
@@ -219,21 +221,19 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         settingsButtonRow.orientation = .horizontal
         settingsButtonRow.spacing = 8
 
-        // Log retention setting: a run count per job; empty falls back to the
-        // default time-based policy (delete runs older than 10 days).
+        // Log retention setting: how many runs to keep per job (1–20). Defaults to 1.
         let retentionLabel = NSTextField(labelWithString: "Keep runs per job:")
         retentionLabel.font = .systemFont(ofSize: 13)
 
-        retentionField = NSTextField()
-        retentionField.placeholderString = "10-day default"
-        retentionField.font = .systemFont(ofSize: 13)
-        retentionField.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        retentionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        retentionPopup.font = .systemFont(ofSize: 13)
+        retentionPopup.addItems(withTitles: (1...20).map(String.init))
 
-        let retentionRow = NSStackView(views: [retentionLabel, retentionField])
+        let retentionRow = NSStackView(views: [retentionLabel, retentionPopup])
         retentionRow.orientation = .horizontal
         retentionRow.spacing = 8
 
-        let retentionHint = NSTextField(labelWithString: "Number of runs to keep per job. Leave empty to keep runs from the last 10 days.")
+        let retentionHint = NSTextField(labelWithString: "Number of most-recent runs to keep per job.")
         retentionHint.font = .systemFont(ofSize: 10)
         retentionHint.textColor = .secondaryLabelColor
         retentionHint.lineBreakMode = .byWordWrapping
@@ -248,18 +248,25 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         settingsContainer.isHidden = true
         settingsContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        // Logs panel (hidden by default)
+        // Detail panel (hidden by default), opened by a row's ☰ button.
+        // Header reads: "<Name> : N runs · <english frequency>" with an edit button.
         logsTitleLabel = NSTextField(labelWithString: "")
         logsTitleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         logsTitleLabel.lineBreakMode = .byTruncatingTail
 
-        let closeLogsBtn = NSButton(title: "✕ Close", target: self, action: #selector(hideLogs))
-        closeLogsBtn.bezelStyle = .toolbar
-        closeLogsBtn.font = .systemFont(ofSize: 11)
+        logsFreqLabel = NSTextField(labelWithString: "")
+        logsFreqLabel.font = .systemFont(ofSize: 12)
+        logsFreqLabel.textColor = .secondaryLabelColor
+        logsFreqLabel.lineBreakMode = .byTruncatingTail
+        logsFreqLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let logsHeader = NSStackView(views: [logsTitleLabel, NSView(), closeLogsBtn])
+        let editLogsBtn = NSButton(title: "✎ Edit", target: self, action: #selector(editLogsJob))
+        editLogsBtn.bezelStyle = .toolbar
+        editLogsBtn.font = .systemFont(ofSize: 11)
+
+        let logsHeader = NSStackView(views: [logsTitleLabel, logsFreqLabel, NSView(), editLogsBtn])
         logsHeader.orientation = .horizontal
-        logsHeader.spacing = 4
+        logsHeader.spacing = 6
         logsHeader.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 0, right: 8)
 
         logsSummaryLabel = NSTextField(labelWithString: "")
@@ -435,7 +442,8 @@ class PopoverViewController: NSViewController, JobRowDelegate {
             stackView.addArrangedSubview(wrapper)
         } else {
             for job in jobs {
-                let row = JobRowView(job: job, delegate: self)
+                let detailOpen = !logsContainer.isHidden && logsJob?.id == job.id
+                let row = JobRowView(job: job, delegate: self, isDetailOpen: detailOpen)
                 stackView.addArrangedSubview(row)
                 row.widthAnchor.constraint(equalTo: stackView.widthAnchor).isActive = true
             }
@@ -444,10 +452,32 @@ class PopoverViewController: NSViewController, JobRowDelegate {
     }
 
     private func resizePopover() {
+        let width = desiredWidth()
+        // Set width first so height is measured against the final width (the
+        // multi-line command box and terminals wrap at that width).
+        popover?.contentSize.width = width
         view.layoutSubtreeIfNeeded()
         let fittingSize = view.fittingSize
         let newHeight = min(fittingSize.height, PopoverLayout.maxHeight)
-        popover?.contentSize = NSSize(width: PopoverLayout.width, height: newHeight)
+        popover?.contentSize = NSSize(width: width, height: newHeight)
+    }
+
+    /// Width that fits the longest job name plus the fixed row chrome, clamped to
+    /// the popover's min/max so short names don't cramp the panels and long names
+    /// don't make it unwieldy.
+    private func desiredWidth() -> CGFloat {
+        // Any open panel (add/edit form, settings, or the detail terminal) uses a
+        // fixed comfortable width so its content isn't cropped by the narrower
+        // name-fit width the collapsed job list uses.
+        if !logsContainer.isHidden || !addFormContainer.isHidden || !settingsContainer.isHidden {
+            return PopoverLayout.panelWidth
+        }
+        let nameFont = NSFont.systemFont(ofSize: 13)
+        let widestName = jobs
+            .map { ($0.name as NSString).size(withAttributes: [.font: nameFont]).width }
+            .max() ?? 0
+        let target = ceil(widestName) + PopoverLayout.rowChromeWidth
+        return min(max(target, PopoverLayout.minWidth), PopoverLayout.maxWidth)
     }
 
     @objc private func showAddForm() {
@@ -642,8 +672,16 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         }
     }
 
+    /// Caps the job name at `maxNameLength` as it's typed or pasted.
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, field === nameField else { return }
+        if field.stringValue.count > PopoverLayout.maxNameLength {
+            field.stringValue = String(field.stringValue.prefix(PopoverLayout.maxNameLength))
+        }
+    }
+
     @objc private func saveNewJob() {
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
+        let name = String(nameField.stringValue.trimmingCharacters(in: .whitespaces).prefix(PopoverLayout.maxNameLength))
         let command = commandTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, !command.isEmpty else { return }
 
@@ -737,16 +775,19 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         addFormContainer.isHidden = true
         logsContainer.isHidden = true
         launchAtLoginCheckbox.state = LoginItemManager.shared.isEnabled ? .on : .off
-        retentionField.stringValue = SettingsStore.shared.logRetentionRuns.map(String.init) ?? ""
+        // Select the stored run count, clamped into the 1...20 menu.
+        let stored = min(max(SettingsStore.shared.logRetentionRuns, 1), 20)
+        retentionPopup.selectItem(withTitle: String(stored))
         settingsContainer.isHidden = false
         resizePopover()
     }
 
     @objc private func hideSettings() {
-        // Persist retention on Done: a positive run count, or empty for the
-        // default 10-day policy. Prune immediately so the change is visible.
-        let entered = Int(retentionField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
-        SettingsStore.shared.logRetentionRuns = entered > 0 ? entered : nil
+        // Persist retention on Done (a run count of 1...20) and prune immediately so
+        // the change is visible.
+        if let title = retentionPopup.titleOfSelectedItem, let n = Int(title) {
+            SettingsStore.shared.logRetentionRuns = n
+        }
         RunLogStore.shared.prune()
         settingsContainer.isHidden = true
         resizePopover()
@@ -800,7 +841,14 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         return f.localizedString(for: date, relativeTo: Date())
     }
 
-    func didViewLogs(_ job: CronJob) {
+    func didToggleDetail(_ job: CronJob) {
+        // Re-clicking the ☰ of the job whose detail is open closes it.
+        if !logsContainer.isHidden, logsJob?.id == job.id {
+            logsContainer.isHidden = true
+            logsJob = nil
+            rebuildJobList()
+            return
+        }
         logsJob = job
         logsRuns = RunLogStore.shared.runs(for: job)
         logsPage = 0
@@ -810,18 +858,20 @@ class PopoverViewController: NSViewController, JobRowDelegate {
         settingsContainer.isHidden = true
         logsContainer.isHidden = false
         refreshLogsPanel()
+        rebuildJobList() // refresh the ☰ highlight on the rows
     }
 
-    @objc private func hideLogs() {
-        logsContainer.isHidden = true
-        logsJob = nil
-        resizePopover()
+    @objc private func editLogsJob() {
+        guard let job = logsJob else { return }
+        showEditForm(for: job)
+        rebuildJobList() // detail is now hidden — clear the ☰ highlight
     }
 
     private func refreshLogsPanel() {
         guard let job = logsJob else { return }
         let count = logsRuns.count
-        logsTitleLabel.stringValue = "\(job.name) — \(count) run\(count == 1 ? "" : "s")"
+        logsTitleLabel.stringValue = "\(job.name) : \(count) run\(count == 1 ? "" : "s")"
+        logsFreqLabel.stringValue = "· \(job.schedule.englishFrequency)"
 
         if logsRuns.isEmpty {
             logsSummaryLabel.stringValue = "No recorded runs yet"

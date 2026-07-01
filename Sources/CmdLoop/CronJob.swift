@@ -61,7 +61,75 @@ enum JobSchedule: Codable, Equatable {
     }
 }
 
+/// Best-effort translation of a schedule into an English phrase (e.g.
+/// "every 5 minutes", "daily at 8:00"). Falls back to the raw form when the
+/// pattern isn't one of the common cases.
+enum CronEnglish {
+    static func describe(_ expr: String) -> String? {
+        let f = expr.split(separator: " ").map(String.init)
+        guard f.count == 5 else { return nil }
+        let (min, hour, dom, mon, dow) = (f[0], f[1], f[2], f[3], f[4])
+
+        if min == "*" && hour == "*" && dom == "*" && mon == "*" && dow == "*" {
+            return "every minute"
+        }
+        if min.hasPrefix("*/"), let n = Int(min.dropFirst(2)),
+           hour == "*", dom == "*", mon == "*", dow == "*" {
+            return "every \(n) minutes"
+        }
+        if hour.hasPrefix("*/"), let n = Int(hour.dropFirst(2)),
+           min == "0", dom == "*", mon == "*", dow == "*" {
+            return "every \(n) hours"
+        }
+        if let m = Int(min), hour == "*", dom == "*", mon == "*", dow == "*" {
+            return "hourly at :\(pad(m))"
+        }
+        guard let m = Int(min), let h = Int(hour) else { return nil }
+        let at = "\(h):\(pad(m))"
+        if dom == "*", mon == "*", let day = weekdayName(dow) {
+            return "every \(day) at \(at)"
+        }
+        if let day = Int(dom), mon == "*", dow == "*" {
+            return "monthly on day \(day) at \(at)"
+        }
+        if dom == "*", mon == "*", dow == "*" {
+            return "daily at \(at)"
+        }
+        return nil
+    }
+
+    static func pad(_ n: Int) -> String { String(format: "%02d", n) }
+
+    static func weekdayName(_ s: String) -> String? {
+        let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        guard let n = Int(s) else { return nil }
+        let idx = n == 7 ? 0 : n
+        return names.indices.contains(idx) ? names[idx] : nil
+    }
+}
+
 extension JobSchedule {
+    /// A human-readable English phrase describing when the job runs.
+    var englishFrequency: String {
+        switch self {
+        case .cron(let expr):
+            return CronEnglish.describe(expr) ?? expr
+        case .interval(let seconds):
+            if seconds >= 3600, seconds % 3600 == 0 {
+                let n = seconds / 3600
+                return "every \(n) hour\(n == 1 ? "" : "s")"
+            }
+            if seconds >= 60, seconds % 60 == 0 {
+                let n = seconds / 60
+                return "every \(n) minute\(n == 1 ? "" : "s")"
+            }
+            return "every \(seconds) second\(seconds == 1 ? "" : "s")"
+        case .calendar(let intervals):
+            if intervals.count == 1 { return intervals[0].englishFrequency }
+            return "\(intervals.count) times daily"
+        }
+    }
+
     /// Compact, human-readable summary shown in the job row.
     var displaySummary: String {
         switch self {
@@ -103,6 +171,20 @@ struct CalendarInterval: Codable, Equatable {
     var cronLikeSummary: String {
         func f(_ v: Int?) -> String { v.map(String.init) ?? "*" }
         return "\(f(minute)) \(f(hour)) \(f(day)) \(f(month)) \(f(weekday))"
+    }
+
+    /// A human-readable English phrase for a single calendar interval.
+    var englishFrequency: String {
+        let at = hour.map { "\($0):\(CronEnglish.pad(minute ?? 0))" }
+        if let wd = weekday, let name = CronEnglish.weekdayName(String(wd)) {
+            return at.map { "every \(name) at \($0)" } ?? "every \(name)"
+        }
+        if let day = day {
+            return at.map { "monthly on day \(day) at \($0)" } ?? "monthly on day \(day)"
+        }
+        if let at = at { return "daily at \(at)" }
+        if let m = minute { return "hourly at :\(CronEnglish.pad(m))" }
+        return "every minute"
     }
 }
 

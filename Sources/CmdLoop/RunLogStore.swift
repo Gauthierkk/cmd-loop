@@ -14,8 +14,6 @@ final class RunLogStore {
     static let shared = RunLogStore()
     private init() {}
 
-    static let defaultRetentionDays = 10
-
     private let fileManager = FileManager.default
 
     var logsRoot: URL {
@@ -130,26 +128,16 @@ final class RunLogStore {
     }
 
     /// Applies the retention policy across all job log directories: keep the
-    /// newest N runs when the user has set a run-count limit in Settings,
-    /// otherwise drop runs older than `defaultRetentionDays`.
+    /// newest N runs per job, where N is the run-count limit from Settings.
     func prune() {
         guard let dirs = try? fileManager.contentsOfDirectory(
             at: logsRoot, includingPropertiesForKeys: [.isDirectoryKey]
         ) else { return }
-        let retainCount = SettingsStore.shared.logRetentionRuns
-        let cutoff = Calendar.current.date(
-            byAdding: .day, value: -Self.defaultRetentionDays, to: Date()
-        ) ?? .distantPast
+        let retainCount = max(SettingsStore.shared.logRetentionRuns, 1)
         for dir in dirs {
             guard (try? dir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
             else { continue }
-            let runs = records(in: dir)
-            let expired: [RunRecord]
-            if let n = retainCount, n > 0 {
-                expired = Array(runs.dropFirst(n))
-            } else {
-                expired = runs.filter { $0.date < cutoff }
-            }
+            let expired = Array(records(in: dir).dropFirst(retainCount))
             for run in expired {
                 try? fileManager.removeItem(at: run.url)
             }

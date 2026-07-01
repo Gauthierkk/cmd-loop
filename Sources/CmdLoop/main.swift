@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-let cmdloopVersion = "1.4.0"
+let cmdloopVersion = "1.5.0"
 
 // Handle informational CLI flags before any GUI/daemon work.
 let cliArgs = CommandLine.arguments
@@ -11,7 +11,7 @@ if cliArgs.contains("--version") || cliArgs.contains("-v") {
 }
 if cliArgs.contains("--help") || cliArgs.contains("-h") {
     print("""
-    cmdloop \(cmdloopVersion) — a minimal macOS menu bar cron manager
+    cmdloop \(cmdloopVersion) — a minimal macOS menu bar cron/launchd manager
 
     Usage: cmdloop [options]
 

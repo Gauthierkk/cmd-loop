@@ -2,8 +2,21 @@ import AppKit
 
 /// Shared dimensions for the popover so every panel sizes against the same page.
 enum PopoverLayout {
-    static let width: CGFloat = 440
+    /// Initial/fallback width before the job list has been measured.
+    static let width: CGFloat = 360
+    /// Fixed width used while any panel (add/edit form, settings, detail) is open,
+    /// so their content isn't cropped/cramped by the narrower name-fit list width.
+    static let panelWidth: CGFloat = 440
+    /// The popover width fits the longest job name, clamped to this range so the
+    /// add/settings/logs panels stay usable and it never grows unwieldy.
+    static let minWidth: CGFloat = 320
+    static let maxWidth: CGFloat = 520
+    /// Fixed horizontal space a job row needs around the (flexible) name column:
+    /// toggle, status dot, last-run, the three action buttons, spacings, insets.
+    static let rowChromeWidth: CGFloat = 260
     static let maxHeight: CGFloat = 520
+    /// Maximum length of a job name.
+    static let maxNameLength = 64
     /// Terminals span this fraction of the popover width, centered.
     static let terminalWidthRatio: CGFloat = 0.8
 }

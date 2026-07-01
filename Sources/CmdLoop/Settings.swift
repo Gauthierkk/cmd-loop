@@ -8,16 +8,17 @@ final class SettingsStore {
         var logRetentionRuns: Int?
     }
 
-    /// Keep this many runs per job (newest first). nil means the default policy:
-    /// delete runs older than 10 days.
-    var logRetentionRuns: Int? {
+    /// Keep this many runs per job (newest first). Defaults to 1; the user can
+    /// raise it (up to 20) in Settings.
+    var logRetentionRuns: Int = 1 {
         didSet { persist() }
     }
 
     private init() {
         if let data = try? Data(contentsOf: Self.url),
-           let payload = try? JSONDecoder().decode(Payload.self, from: data) {
-            logRetentionRuns = payload.logRetentionRuns
+           let payload = try? JSONDecoder().decode(Payload.self, from: data),
+           let stored = payload.logRetentionRuns {
+            logRetentionRuns = stored
         }
     }
 

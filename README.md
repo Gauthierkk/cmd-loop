@@ -12,7 +12,7 @@ A minimal macOS menu bar app for managing scheduled commands via **cron or launc
 - Disabling a job removes it from the crontab / unloads and removes its plist; enabling adds it back
 - Jobs run via cron or launchd even if cmdloop isn't open
 
-Job metadata (names, last run times) is stored in `~/.config/cmd-loop/config.json`. Each run writes its own log file under `~/.config/cmd-loop/logs/<job-uuid>/`, so run history works even when the app is closed. By default runs older than 10 days are deleted; in Settings you can instead keep a fixed number of runs per job.
+Job metadata (names, last run times) is stored in `~/.config/cmd-loop/config.json`. Each run writes its own log file under `~/.config/cmd-loop/logs/<job-uuid>/`, so run history works even when the app is closed. By default only the most recent run is kept per job; in Settings you can raise this to keep up to 20 runs per job.
 
 Commands run in a login shell (`$SHELL -l -c`) so your PATH and environment are available.
 
@@ -68,7 +68,7 @@ Per-job actions:
 
 Footer:
 
-- **⚙ Settings** — start at login, log retention (number of runs per job; default keeps 10 days), and Clear Logs
+- **⚙ Settings** — start at login, log retention (runs to keep per job, 1–20; default 1), and Clear Logs
 - **+** — add a command: name, backend (Cron or Launchd), schedule (a cron expression like `0 8 * * *`, or launchd calendar/interval fields), and shell command (multi-line allowed)
 - **⏻** — quit cmdloop (scheduled jobs keep running via cron)
 
