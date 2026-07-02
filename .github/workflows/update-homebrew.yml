@@ -5,6 +5,9 @@ on:
     types: [published]
   workflow_dispatch:
 
+permissions:
+  contents: write # upload the binary asset to the release
+
 jobs:
   update-formula:
     runs-on: macos-latest
@@ -23,23 +26,77 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Download and hash tarball
-        id: hash
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      # Build each slice separately and lipo them together: works with the
+      # command-line tools alone (the combined `--arch arm64 --arch x86_64`
+      # form requires Xcode's XCBuild).
+      - name: Build universal binary
         run: |
-          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.release.outputs.tag }}.tar.gz"
-          SHA=$(curl -sL "$URL" | shasum -a 256 | awk '{print $1}')
+          swift build -c release --triple arm64-apple-macosx
+          swift build -c release --triple x86_64-apple-macosx
+          lipo -create \
+            .build/arm64-apple-macosx/release/cmdloop \
+            .build/x86_64-apple-macosx/release/cmdloop \
+            -output cmdloop
+          lipo -info cmdloop
+          ./cmdloop --version
+
+      - name: Package and upload release asset
+        id: asset
+        run: |
+          ASSET="cmdloop-${{ steps.release.outputs.version }}-macos-universal.tar.gz"
+          tar -czf "$ASSET" cmdloop com.cmdloop.plist LICENSE
+          gh release upload "${{ steps.release.outputs.tag }}" "$ASSET" --clobber --repo ${{ github.repository }}
+          SHA=$(shasum -a 256 "$ASSET" | awk '{print $1}')
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "url=https://github.com/${{ github.repository }}/releases/download/${{ steps.release.outputs.tag }}/$ASSET" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Clone homebrew tap
         run: |
           git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/Gauthierkk/homebrew-tap.git
 
-      - name: Update formula
+      # The formula installs the prebuilt universal binary — no Swift
+      # toolchain or compile on the user's machine. Regenerated wholesale each
+      # release so this workflow stays the single source of truth.
+      - name: Write formula
         run: |
-          cd homebrew-tap
-          sed -i '' 's|url ".*"|url "${{ steps.hash.outputs.url }}"|' Formula/cmdloop.rb
-          sed -i '' 's|sha256 ".*"|sha256 "${{ steps.hash.outputs.sha256 }}"|' Formula/cmdloop.rb
+          cat > homebrew-tap/Formula/cmdloop.rb <<EOF
+          class Cmdloop < Formula
+            desc "Minimal macOS menu bar app for managing cron jobs"
+            homepage "https://github.com/Gauthierkk/cmd-loop"
+            url "${{ steps.asset.outputs.url }}"
+            sha256 "${{ steps.asset.outputs.sha256 }}"
+            license "MIT"
+
+            depends_on :macos
+
+            def install
+              bin.install "cmdloop"
+              prefix.install "com.cmdloop.plist"
+            end
+
+            def caveats
+              <<~CAVEATS
+                To start cmdloop automatically on login:
+                  cp #{opt_prefix}/com.cmdloop.plist ~/Library/LaunchAgents/
+                  launchctl load ~/Library/LaunchAgents/com.cmdloop.plist
+
+                Or just run it manually:
+                  cmdloop
+              CAVEATS
+            end
+
+            test do
+              assert_predicate bin/"cmdloop", :executable?
+            end
+          end
+          EOF
 
       - name: Commit and push
         run: |
@@ -49,5 +106,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/cmdloop.rb
           git diff --cached --quiet && echo "No changes" && exit 0
-          git commit -m "Update cmdloop to ${{ steps.release.outputs.version }}"
+          git commit -m "Update cmdloop to ${{ steps.release.outputs.version }} (prebuilt binary)"
           git push

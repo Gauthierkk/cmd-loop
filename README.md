@@ -83,4 +83,4 @@ cmdloop --help     # usage
 ## Requirements
 
 - macOS 13+
-- Swift 5.9+
+- Swift 5.9+ (only when building from source; the brew install ships a prebuilt binary)
