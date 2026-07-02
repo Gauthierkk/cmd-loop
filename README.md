@@ -12,7 +12,7 @@ A minimal macOS menu bar app for managing scheduled commands via **cron or launc
 - Disabling a job removes it from the crontab / unloads and removes its plist; enabling adds it back
 - Jobs run via cron or launchd even if cmdloop isn't open
 
-Job metadata (names, last run times) is stored in `~/.config/cmd-loop/config.json`. Each run writes its own log file under `~/.config/cmd-loop/logs/<job-uuid>/`, so run history works even when the app is closed. By default only the most recent run is kept per job; in Settings you can raise this to keep up to 20 runs per job.
+Job metadata (names, last run times) is stored in `~/.config/cmd-loop/config.json`; display names for external entries live in `names.json` and app preferences in `settings.json` alongside it. Each run writes its own log file under `~/.config/cmd-loop/logs/<job-uuid>/`, so run history works even when the app is closed. By default only the most recent run is kept per job; in Settings you can raise this to keep up to 20 runs per job.
 
 Commands run in a login shell (`$SHELL -l -c`) so your PATH and environment are available.
 
@@ -22,6 +22,8 @@ Commands run in a login shell (`$SHELL -l -c`) so your PATH and environment are 
 brew tap gauthierkk/tap
 brew install cmdloop
 ```
+
+Installs a prebuilt universal binary (Apple Silicon + Intel) — no Xcode or Swift toolchain needed.
 
 Then run it:
 
@@ -51,26 +53,28 @@ brew untap gauthierkk/tap
 ```bash
 swift build
 swift run cmdloop
+make help   # build/run/test/install targets, plus launchd testing helpers
 ```
 
 ## Usage
 
 Click the **⏲** icon in your menu bar to open the popover.
 
-Each job row shows a toggle, a status dot, the job name, a `cron`/`launchd` tag, its schedule, and the last run time. The status dot pulses green while a run is in progress, turns solid green after a clean exit, red after a failure, and stays dark until the job's first run.
+Each job row shows a toggle, a status dot, the job name, and the last run time. The status dot pulses green while a run is in progress, turns solid green after a clean exit, red after a failure, and stays dark until the job's first run. The popover sizes itself to fit the longest job name.
 
 Per-job actions:
 
-- **Toggle** — enable/disable a job (adds/removes it from crontab)
+- **Toggle** — enable/disable a job (adds/removes its crontab entry, or loads/unloads its LaunchAgent). External entries can't be toggled — enable/disable stays with their owner
 - **▶ Run now** — execute immediately in the background; the result lands in run history
-- **☰ Logs** — run count, last run time, and each run's output; expand to browse previous runs (10 per page)
-- **✎ Edit / ✕ Delete** — modify or remove a job (editing an external entry rewrites its crontab line directly and preserves its history)
+- **☰ Details & logs** — opens the detail panel: run count, schedule in plain English, last run time, and each run's output; expand to browse previous runs (10 per page). The ☰ stays highlighted while its panel is open
+- **✎ Edit** (in the detail panel header) — change a job's name, schedule, command, or backend (backend switching is for cmdloop-managed jobs only). Editing an external entry rewrites its crontab line or plist in place and preserves its run history. (An external agent with multiple calendar intervals shows its schedule read-only; name and command remain editable)
+- **✕ Delete** — remove the job and its scheduler entry
 
 Footer:
 
 - **⚙ Settings** — start at login, log retention (runs to keep per job, 1–20; default 1), and Clear Logs
 - **+** — add a command: name, backend (Cron or Launchd), schedule (a cron expression like `0 8 * * *`, or launchd calendar/interval fields), and shell command (multi-line allowed)
-- **⏻** — quit cmdloop (scheduled jobs keep running via cron)
+- **⏻** — quit cmdloop (scheduled jobs keep running via cron/launchd)
 
 ## CLI
 
