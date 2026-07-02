@@ -1,5 +1,15 @@
 import AppKit
 
+extension RelativeDateTimeFormatter {
+    /// Shared abbreviated formatter — creating one per row/call is expensive.
+    /// Not thread-safe; main-thread (UI) use only.
+    static let abbreviated: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+}
+
 protocol JobRowDelegate: AnyObject {
     func didToggleJob(_ job: CronJob, enabled: Bool)
     func didRunNow(_ job: CronJob)
@@ -83,14 +93,9 @@ class JobRowView: NSView {
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         nameLabel.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
-        let lastRun: String
-        if let time = job.lastRunTime {
-            let formatter = RelativeDateTimeFormatter()
-            formatter.unitsStyle = .abbreviated
-            lastRun = formatter.localizedString(for: time, relativeTo: Date())
-        } else {
-            lastRun = "never"
-        }
+        let lastRun = job.lastRunTime.map {
+            RelativeDateTimeFormatter.abbreviated.localizedString(for: $0, relativeTo: Date())
+        } ?? "never"
         let lastRunLabel = NSTextField(labelWithString: lastRun)
         lastRunLabel.textColor = .tertiaryLabelColor
         lastRunLabel.font = .systemFont(ofSize: 10)

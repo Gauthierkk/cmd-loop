@@ -27,10 +27,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.contentViewController = vc
         vc.popover = popover
+        // Build the popover's view now so the first click doesn't pay for UI
+        // construction plus the crontab read.
+        _ = vc.view
 
-        let jobs = ConfigManager.shared.load()
-        SchedulerManager.shared.syncManaged(jobs)
-        RunLogStore.shared.prune()
+        // Reconciling the schedulers shells out to crontab/launchctl; keep it
+        // off the main thread so launch stays instant.
+        DispatchQueue.global(qos: .utility).async {
+            let jobs = ConfigManager.shared.load()
+            RunLogStore.shared.migrateLegacyLogs(for: jobs)
+            SchedulerManager.shared.syncManaged(jobs)
+            RunLogStore.shared.prune()
+        }
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {

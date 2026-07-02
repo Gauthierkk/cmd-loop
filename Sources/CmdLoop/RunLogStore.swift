@@ -36,22 +36,27 @@ final class RunLogStore {
     func ensureDirectory(for job: CronJob) -> URL {
         let dir = directory(for: job)
         try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
-        migrateLegacyLog(for: job, into: dir)
         return dir
     }
 
-    /// Moves a pre-run-history single-file log (<name>-<uuid>.log) into the job's
-    /// run directory as one historical run, so old output isn't lost.
-    private func migrateLegacyLog(for job: CronJob, into dir: URL) {
+    /// Moves pre-run-history single-file logs (<name>-<uuid>.log at the logs
+    /// root) into per-job run directories as one historical run each, so old
+    /// output isn't lost. One scan at startup; this used to run on every
+    /// log-path generation.
+    func migrateLegacyLogs(for jobs: [CronJob]) {
         guard let files = try? fileManager.contentsOfDirectory(
             at: logsRoot, includingPropertiesForKeys: [.contentModificationDateKey]
         ) else { return }
-        for file in files
-        where file.pathExtension == "log" && file.lastPathComponent.contains(job.id.uuidString) {
-            let mtime = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate ?? Date()
-            let dest = dir.appendingPathComponent("run-\(Self.timestampFormatter.string(from: mtime)).log")
-            try? fileManager.moveItem(at: file, to: dest)
+        let logFiles = files.filter { $0.pathExtension == "log" }
+        guard !logFiles.isEmpty else { return }
+        for job in jobs {
+            for file in logFiles where file.lastPathComponent.contains(job.id.uuidString) {
+                let dir = ensureDirectory(for: job)
+                let mtime = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? Date()
+                let dest = dir.appendingPathComponent("run-\(Self.timestampFormatter.string(from: mtime)).log")
+                try? fileManager.moveItem(at: file, to: dest)
+            }
         }
     }
 

@@ -1,0 +1,438 @@
+import AppKit
+
+/// The add/edit form panel: name, backend picker, cron or launchd schedule
+/// editor, and the multi-line command box.
+extension PopoverViewController {
+
+    /// Builds the form's views into `addFormContainer` (hidden by default).
+    func buildAddForm() {
+        nameField = NSTextField()
+        nameField.placeholderString = "Name"
+        nameField.font = .systemFont(ofSize: 14)
+        nameField.delegate = self // enforces the name-length cap
+        nameField.translatesAutoresizingMaskIntoConstraints = false
+        nameField.heightAnchor.constraint(equalToConstant: 28).isActive = true
+
+        cronField = NSTextField()
+        cronField.placeholderString = "Cron (e.g., */5 * * * *)"
+        cronField.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+        cronField.translatesAutoresizingMaskIntoConstraints = false
+        cronField.heightAnchor.constraint(equalToConstant: 28).isActive = true
+
+        // Multi-line command input
+        commandTextView = NSTextView()
+        commandTextView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        commandTextView.isRichText = false
+        commandTextView.isAutomaticQuoteSubstitutionEnabled = false
+        commandTextView.isAutomaticTextReplacementEnabled = false
+        commandTextView.textContainerInset = NSSize(width: 4, height: 4)
+
+        let cmdScroll = NSScrollView()
+        cmdScroll.documentView = commandTextView
+        cmdScroll.hasVerticalScroller = true
+        cmdScroll.borderType = .bezelBorder
+        cmdScroll.translatesAutoresizingMaskIntoConstraints = false
+        cmdScroll.heightAnchor.constraint(equalToConstant: 48).isActive = true
+        commandTextView.minSize = NSSize(width: 0, height: 48)
+        commandTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        commandTextView.isVerticallyResizable = true
+        commandTextView.isHorizontallyResizable = false
+        commandTextView.autoresizingMask = [.width]
+        commandTextView.textContainer?.widthTracksTextView = true
+
+        let saveBtn = NSButton(title: "Save", target: self, action: #selector(saveNewJob))
+        saveBtn.bezelStyle = .rounded
+        saveBtn.keyEquivalent = "\r"
+
+        let cancelBtn = NSButton(title: "Cancel", target: self, action: #selector(hideAddForm))
+        cancelBtn.bezelStyle = .rounded
+
+        let buttonRow = NSStackView(views: [NSView(), cancelBtn, saveBtn])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+
+        // Hint shown when renaming an external (non-cmdloop) cron entry.
+        externalEditHint = NSTextField(labelWithString: "External cron entry — changes are written directly to your crontab.")
+        externalEditHint.font = .systemFont(ofSize: 11)
+        externalEditHint.textColor = .secondaryLabelColor
+        externalEditHint.lineBreakMode = .byWordWrapping
+        externalEditHint.maximumNumberOfLines = 2
+        externalEditHint.isHidden = true
+
+        // Backend picker: which local scheduler runs the job.
+        backendSelector = NSSegmentedControl(
+            labels: ["Cron", "Launchd"], trackingMode: .selectOne,
+            target: self, action: #selector(backendChanged)
+        )
+        backendSelector.selectedSegment = 0
+        backendSelector.translatesAutoresizingMaskIntoConstraints = false
+
+        // Launchd schedule editor: a Calendar / Interval mode selector over native
+        // launchd fields (StartCalendarInterval / StartInterval).
+        launchdModeSelector = NSSegmentedControl(
+            labels: ["Calendar", "Interval"], trackingMode: .selectOne,
+            target: self, action: #selector(launchdModeChanged)
+        )
+        launchdModeSelector.selectedSegment = 0
+
+        func calField(_ placeholder: String) -> NSTextField {
+            let f = NSTextField()
+            f.placeholderString = placeholder
+            f.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            f.alignment = .center
+            f.translatesAutoresizingMaskIntoConstraints = false
+            f.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            return f
+        }
+        minuteField = calField("min")
+        hourField = calField("hour")
+        dayField = calField("day")
+        weekdayField = calField("wday")
+        monthField = calField("month")
+        let calendarRow = NSStackView(views: [minuteField, hourField, dayField, weekdayField, monthField])
+        calendarRow.orientation = .horizontal
+        calendarRow.distribution = .fillEqually
+        calendarRow.spacing = 4
+
+        let calHint = NSTextField(labelWithString: "Blank = every. Fields: minute, hour, day, weekday (Sun=0), month.")
+        calHint.font = .systemFont(ofSize: 10)
+        calHint.textColor = .secondaryLabelColor
+        calHint.lineBreakMode = .byWordWrapping
+        calHint.maximumNumberOfLines = 2
+
+        calendarGroup = NSStackView(views: [calendarRow, calHint])
+        calendarGroup.orientation = .vertical
+        calendarGroup.alignment = .width
+        calendarGroup.spacing = 4
+
+        let everyLabel = NSTextField(labelWithString: "Every")
+        everyLabel.font = .systemFont(ofSize: 12)
+        intervalField = NSTextField()
+        intervalField.placeholderString = "N"
+        intervalField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        intervalField.translatesAutoresizingMaskIntoConstraints = false
+        intervalField.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        intervalField.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        intervalUnitSelector = NSSegmentedControl(
+            labels: ["minutes", "seconds"], trackingMode: .selectOne, target: nil, action: nil
+        )
+        intervalUnitSelector.selectedSegment = 0
+        intervalRow = NSStackView(views: [everyLabel, intervalField, intervalUnitSelector, NSView()])
+        intervalRow.orientation = .horizontal
+        intervalRow.spacing = 6
+
+        scheduleReadOnlyLabel = NSTextField(labelWithString: "")
+        scheduleReadOnlyLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        scheduleReadOnlyLabel.textColor = .secondaryLabelColor
+        scheduleReadOnlyLabel.lineBreakMode = .byWordWrapping
+        scheduleReadOnlyLabel.maximumNumberOfLines = 3
+        scheduleReadOnlyLabel.isHidden = true
+
+        launchdContainer = NSStackView(views: [launchdModeSelector, calendarGroup, intervalRow, scheduleReadOnlyLabel])
+        launchdContainer.orientation = .vertical
+        launchdContainer.alignment = .width
+        launchdContainer.spacing = 8
+        launchdContainer.isHidden = true
+
+        addFormContainer = NSStackView(views: [nameField, externalEditHint, backendSelector, cronField, launchdContainer, cmdScroll, buttonRow])
+        addFormContainer.orientation = .vertical
+        addFormContainer.alignment = .width
+        addFormContainer.spacing = 10
+        addFormContainer.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        addFormContainer.isHidden = true
+        addFormContainer.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    // MARK: - Show / hide
+
+    @objc func showAddForm() {
+        editingJob = nil
+        settingsContainer.isHidden = true
+        hideLogsPanel()
+        addFormContainer.isHidden = false
+        nameField.stringValue = ""
+        commandTextView.string = ""
+        editingScheduleReadOnly = false
+        backendSelector.selectedSegment = 0
+        backendSelector.isEnabled = true
+        resetScheduleFields()
+        updateScheduleFieldVisibility()
+        setCommandFieldsEditable(true)
+        externalEditHint.isHidden = true
+        resizePopover()
+        view.window?.makeFirstResponder(nameField)
+    }
+
+    func showEditForm(for job: CronJob) {
+        editingJob = job
+        settingsContainer.isHidden = true
+        hideLogsPanel()
+        addFormContainer.isHidden = false
+        nameField.stringValue = (job.name == "cronjob" || job.name == "launchd job") ? "" : job.name
+        commandTextView.string = job.command
+        resetScheduleFields()
+
+        editingScheduleReadOnly = false
+        switch job.backend {
+        case .cron:
+            backendSelector.selectedSegment = 0
+            cronField.stringValue = job.cronExpression
+        case .launchd:
+            backendSelector.selectedSegment = 1
+            populateLaunchdFields(from: job.schedule)
+            // An external agent whose schedule can't round-trip the editor (multiple
+            // calendar dicts) is shown read-only; command and name still apply.
+            if job.source == .external, !LaunchDManager.shared.isEditableSchedule(job.schedule) {
+                editingScheduleReadOnly = true
+                scheduleReadOnlyLabel.stringValue =
+                    "Schedule: \(job.schedule.displaySummary)\nThis agent's schedule can't be edited here; editing keeps it as-is."
+            }
+        }
+        // Backend can only be switched for cmdloop-managed jobs; external entries
+        // stay on the backend they came from.
+        backendSelector.isEnabled = (job.source == .managed)
+        updateScheduleFieldVisibility()
+
+        // External entries are fully editable; saving rewrites their scheduler entry
+        // directly. Show a note so it's clear the change isn't sandboxed.
+        let isExternal = job.source == .external
+        externalEditHint.stringValue = job.backend == .launchd
+            ? "External launchd agent — changes are written directly to its plist in ~/Library/LaunchAgents."
+            : "External cron entry — changes are written directly to your crontab."
+        setCommandFieldsEditable(true)
+        externalEditHint.isHidden = !isExternal
+
+        resizePopover()
+        view.window?.makeFirstResponder(nameField)
+    }
+
+    /// Enables/disables the command + cron inputs and dims them when read-only.
+    private func setCommandFieldsEditable(_ editable: Bool) {
+        cronField.isEditable = editable
+        cronField.isSelectable = true
+        cronField.textColor = editable ? .labelColor : .secondaryLabelColor
+        commandTextView.isEditable = editable
+        commandTextView.textColor = editable ? .textColor : .secondaryLabelColor
+    }
+
+    @objc private func hideAddForm() {
+        addFormContainer.isHidden = true
+        editingJob = nil
+        resizePopover()
+    }
+
+    // MARK: - Schedule editor
+
+    @objc private func backendChanged() {
+        updateScheduleFieldVisibility()
+        resizePopover()
+    }
+
+    @objc private func launchdModeChanged() {
+        updateLaunchdModeVisibility()
+        resizePopover()
+    }
+
+    private var isLaunchdSelected: Bool { backendSelector.selectedSegment == 1 }
+
+    /// Shows the cron field or the launchd editor depending on the backend picker.
+    private func updateScheduleFieldVisibility() {
+        cronField.isHidden = isLaunchdSelected
+        launchdContainer.isHidden = !isLaunchdSelected
+        if isLaunchdSelected { updateLaunchdModeVisibility() }
+    }
+
+    private func updateLaunchdModeVisibility() {
+        if editingScheduleReadOnly {
+            launchdModeSelector.isHidden = true
+            calendarGroup.isHidden = true
+            intervalRow.isHidden = true
+            scheduleReadOnlyLabel.isHidden = false
+            return
+        }
+        scheduleReadOnlyLabel.isHidden = true
+        launchdModeSelector.isHidden = false
+        let calendar = launchdModeSelector.selectedSegment == 0
+        calendarGroup.isHidden = !calendar
+        intervalRow.isHidden = calendar
+    }
+
+    private func resetScheduleFields() {
+        cronField.stringValue = ""
+        [minuteField, hourField, dayField, weekdayField, monthField, intervalField]
+            .forEach { $0?.stringValue = "" }
+        intervalUnitSelector.selectedSegment = 0
+        launchdModeSelector.selectedSegment = 0
+        resetScheduleFieldBackgrounds()
+    }
+
+    private func resetScheduleFieldBackgrounds() {
+        cronField.backgroundColor = .controlBackgroundColor
+        [minuteField, hourField, dayField, weekdayField, monthField, intervalField]
+            .forEach { $0?.backgroundColor = .controlBackgroundColor }
+    }
+
+    private func populateLaunchdFields(from schedule: JobSchedule) {
+        switch schedule {
+        case .interval(let seconds):
+            launchdModeSelector.selectedSegment = 1
+            if seconds % 60 == 0 {
+                intervalField.stringValue = String(seconds / 60)
+                intervalUnitSelector.selectedSegment = 0
+            } else {
+                intervalField.stringValue = String(seconds)
+                intervalUnitSelector.selectedSegment = 1
+            }
+        case .calendar(let intervals):
+            launchdModeSelector.selectedSegment = 0
+            if let i = intervals.first {
+                minuteField.stringValue = i.minute.map(String.init) ?? ""
+                hourField.stringValue = i.hour.map(String.init) ?? ""
+                dayField.stringValue = i.day.map(String.init) ?? ""
+                weekdayField.stringValue = i.weekday.map(String.init) ?? ""
+                monthField.stringValue = i.month.map(String.init) ?? ""
+            }
+        case .cron:
+            launchdModeSelector.selectedSegment = 0
+        }
+    }
+
+    /// Reads a launchd schedule from the editor. Returns nil if any field is
+    /// invalid (non-integer or out of range, or a non-positive interval).
+    private func readLaunchdSchedule() -> JobSchedule? {
+        if launchdModeSelector.selectedSegment == 1 {
+            guard let n = Int(intervalField.stringValue.trimmingCharacters(in: .whitespaces)), n > 0 else {
+                return nil
+            }
+            return .interval(intervalUnitSelector.selectedSegment == 0 ? n * 60 : n)
+        }
+        let m = parseCalField(minuteField, valid: 0...59)
+        let h = parseCalField(hourField, valid: 0...23)
+        let d = parseCalField(dayField, valid: 1...31)
+        let wd = parseCalField(weekdayField, valid: 0...7)
+        let mo = parseCalField(monthField, valid: 1...12)
+        guard m.ok, h.ok, d.ok, wd.ok, mo.ok else { return nil }
+        return .calendar([CalendarInterval(
+            minute: m.value, hour: h.value, day: d.value, weekday: wd.value, month: mo.value
+        )])
+    }
+
+    /// Parses one calendar field: blank or "*" means "every" (nil); otherwise an
+    /// integer in range. `ok == false` signals an invalid entry.
+    private func parseCalField(_ field: NSTextField, valid: ClosedRange<Int>) -> (ok: Bool, value: Int?) {
+        let s = field.stringValue.trimmingCharacters(in: .whitespaces)
+        if s.isEmpty || s == "*" { return (true, nil) }
+        guard let v = Int(s), valid.contains(v) else { return (false, nil) }
+        return (true, v)
+    }
+
+    private func flashInvalidSchedule() {
+        let red = NSColor.systemRed.withAlphaComponent(0.15)
+        if launchdModeSelector.selectedSegment == 1 {
+            intervalField.backgroundColor = red
+        } else {
+            [minuteField, hourField, dayField, weekdayField, monthField].forEach {
+                $0?.backgroundColor = red
+            }
+        }
+    }
+
+    /// Caps the job name at `maxNameLength` as it's typed or pasted.
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, field === nameField else { return }
+        if field.stringValue.count > PopoverLayout.maxNameLength {
+            field.stringValue = String(field.stringValue.prefix(PopoverLayout.maxNameLength))
+        }
+    }
+
+    // MARK: - Save
+
+    @objc private func saveNewJob() {
+        let name = String(nameField.stringValue.trimmingCharacters(in: .whitespaces).prefix(PopoverLayout.maxNameLength))
+        let command = commandTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !command.isEmpty else { return }
+
+        // Build and validate the schedule from whichever editor is active.
+        guard let schedule = buildScheduleFromForm() else { return }
+        let backend: JobBackend = isLaunchdSelected ? .launchd : .cron
+
+        // Editing an external entry: rewrite the underlying scheduler entry directly.
+        if let editing = editingJob, editing.source == .external {
+            switch editing.backend {
+            case .cron:
+                saveExternalCronEdit(editing: editing, name: name, command: command, schedule: schedule)
+            case .launchd:
+                SchedulerManager.shared.updateExternalLaunchd(editing, command: command, schedule: schedule)
+                if let ref = LaunchDManager.shared.externalAgents[editing.id] {
+                    ExternalNameStore.shared.setName(name, for: LaunchDManager.shared.externalNameKey(label: ref.label))
+                }
+            }
+            editingJob = nil
+            addFormContainer.isHidden = true
+            loadJobs()
+            return
+        }
+
+        // Managed create / edit.
+        if let editId = editingJob?.id, let idx = jobs.firstIndex(where: { $0.id == editId }) {
+            // Switching away from launchd leaves an orphan plist; remove it first.
+            if jobs[idx].backend == .launchd, backend != .launchd {
+                SchedulerManager.shared.deleteManaged(jobs[idx])
+            }
+            jobs[idx].name = name
+            jobs[idx].command = command
+            jobs[idx].schedule = schedule
+            jobs[idx].backend = backend
+        } else {
+            jobs.append(CronJob(name: name, command: command, schedule: schedule, backend: backend))
+        }
+        editingJob = nil
+        persistManagedJobs()
+        rebuildJobList()
+        addFormContainer.isHidden = true
+        resizePopover()
+    }
+
+    /// Reads and validates the schedule from the active editor, flashing the
+    /// offending field and returning nil on invalid input.
+    private func buildScheduleFromForm() -> JobSchedule? {
+        // Preserve an un-editable external launchd schedule (multi-dict calendar).
+        if editingScheduleReadOnly, let editing = editingJob {
+            return editing.schedule
+        }
+        if isLaunchdSelected {
+            guard let schedule = readLaunchdSchedule() else {
+                flashInvalidSchedule()
+                return nil
+            }
+            return schedule
+        }
+        let cron = cronField.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !cron.isEmpty, (try? CronParser(cron)) != nil else {
+            cronField.backgroundColor = NSColor.systemRed.withAlphaComponent(0.15)
+            return nil
+        }
+        return .cron(cron)
+    }
+
+    /// Rewrites an external cron entry's line if schedule/command changed, carrying
+    /// its stored name and run history to the new content-derived identity.
+    private func saveExternalCronEdit(editing: CronJob, name: String, command: String, schedule: JobSchedule) {
+        guard case .cron(let cron) = schedule else { return }
+        if cron != editing.cronExpression || command != editing.command {
+            CrontabManager.shared.updateExternalEntry(
+                oldCron: editing.cronExpression, oldCommand: editing.command,
+                newCron: cron, newCommand: command
+            )
+            let oldKey = ExternalNameStore.key(cron: editing.cronExpression, command: editing.command)
+            ExternalNameStore.shared.setName("", for: oldKey)
+            let newKey = ExternalNameStore.key(cron: cron, command: command)
+            RunLogStore.shared.moveHistory(
+                from: deterministicUUID(from: oldKey),
+                to: deterministicUUID(from: newKey)
+            )
+        }
+        let newKey = ExternalNameStore.key(cron: cron, command: command)
+        ExternalNameStore.shared.setName(name, for: newKey)
+    }
+}

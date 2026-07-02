@@ -30,8 +30,8 @@ final class SchedulerManager {
         }
 
         // Run history is the most accurate last-run source (it includes scheduled
-        // runs that happened while the app was closed). Enrich the launchd jobs we
-        // just added; CrontabManager already enriched the rest (idempotent).
+        // runs that happened while the app was closed). One pass over the merged
+        // list — each check lists that job's log directory.
         for i in jobs.indices {
             if let latest = RunLogStore.shared.latestRunDate(for: jobs[i]),
                latest > (jobs[i].lastRunTime ?? .distantPast) {

@@ -132,12 +132,7 @@ final class LaunchDManager {
     /// Wraps the user's command so each launchd fire writes its own run-log file,
     /// matching cron's per-run history. Unlike cron, launchd needs no `%` escaping.
     private func wrappedCommand(for job: CronJob) -> String {
-        let flattened = job.command
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "; ")
-        return "\(flattened) \(RunLogStore.shared.launchdRedirection(for: job))"
+        "\(job.singleLineCommand) \(RunLogStore.shared.launchdRedirection(for: job))"
     }
 
     // MARK: - External agent discovery
@@ -233,15 +228,24 @@ final class LaunchDManager {
 
     private func writeAndLoad(_ job: CronJob) {
         let url = plistURL(for: job)
+        guard let content = plistContent(for: job).data(using: .utf8) else { return }
+        // syncManaged re-runs on every save/toggle of any job; when the on-disk
+        // agent already matches, skip the launchctl round-trip (two process
+        // spawns per job, on the main thread).
+        if let existing = try? Data(contentsOf: url), existing == content { return }
         try? FileManager.default.createDirectory(at: agentsDirectory, withIntermediateDirectories: true)
-        try? plistContent(for: job).data(using: .utf8)?.write(to: url, options: .atomic)
+        try? content.write(to: url, options: .atomic)
         bootout(label: label(for: job)) // clear any stale registration first
         bootstrap(plistPath: url.path)
     }
 
     private func unloadAndRemove(_ job: CronJob) {
+        let url = plistURL(for: job)
+        // No plist on disk means the agent was never loaded (or a previous sync
+        // already removed it) — nothing to boot out.
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
         bootout(label: label(for: job))
-        try? FileManager.default.removeItem(at: plistURL(for: job))
+        try? FileManager.default.removeItem(at: url)
     }
 
     // MARK: External agent operations (keep the plist file unless deleting)
