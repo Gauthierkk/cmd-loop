@@ -187,9 +187,10 @@ class PopoverViewController: NSViewController, JobRowDelegate, NSTextFieldDelega
             ])
             stackView.addArrangedSubview(wrapper)
         } else {
+            let hasExternal = jobs.contains { $0.source == .external }
             for job in jobs {
                 let detailOpen = !logsContainer.isHidden && logsJob?.id == job.id
-                let row = JobRowView(job: job, delegate: self, isDetailOpen: detailOpen)
+                let row = JobRowView(job: job, delegate: self, isDetailOpen: detailOpen, showAdoptColumn: hasExternal)
                 stackView.addArrangedSubview(row)
                 row.widthAnchor.constraint(equalTo: stackView.widthAnchor).isActive = true
             }
@@ -252,6 +253,10 @@ class PopoverViewController: NSViewController, JobRowDelegate, NSTextFieldDelega
         // logs panel. If that panel is already open for this job, the
         // jobsDidChange notification refreshes it when the run finishes.
         SchedulerManager.shared.runNow(job)
+    }
+
+    func didAdoptJob(_ job: CronJob) {
+        adopt(job) // shared with the detail panel's ⬇ Adopt button
     }
 
     func didEditJob(_ job: CronJob) {

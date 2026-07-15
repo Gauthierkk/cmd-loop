@@ -68,7 +68,7 @@ Per-job actions:
 - **▶ Run now** — execute immediately in the background; the result lands in run history
 - **☰ Details & logs** — opens the detail panel: run count, schedule in plain English, last run time, and each run's output; expand to browse previous runs (10 per page). The ☰ stays highlighted while its panel is open
 - **✎ Edit** (in the detail panel header) — change a job's name, schedule, command, or backend (backend switching is for cmdloop-managed jobs only). Editing an external entry rewrites its crontab line or plist in place and preserves its run history. (An external agent with multiple calendar intervals shows its schedule read-only; name and command remain editable)
-- **⬇ Adopt** (in the detail panel header, external entries only) — take ownership of a pre-existing cron entry or LaunchAgent so cmdloop wraps its command with per-run logging. The schedule and command are unchanged; from then on every scheduled run shows up in run history. Any logs already recorded for the entry, and its display name, carry over
+- **⬇ Adopt** (on the row and in the detail panel header, external entries only) — take ownership of a pre-existing cron entry or LaunchAgent so cmdloop wraps its command with per-run logging. The schedule and command are unchanged; from then on every scheduled run shows up in run history. Any logs already recorded for the entry, and its display name, carry over
 - **⬆ Release** (in the detail panel header, managed jobs only) — the inverse of Adopt: hand the job back to a plain cron/launchd entry and stop managing it. It keeps running on the same schedule, but new runs are no longer logged; existing run history is kept
 - **✕ Delete** — remove the job and its scheduler entry
 

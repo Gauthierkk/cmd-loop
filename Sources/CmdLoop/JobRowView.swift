@@ -13,6 +13,7 @@ extension RelativeDateTimeFormatter {
 protocol JobRowDelegate: AnyObject {
     func didToggleJob(_ job: CronJob, enabled: Bool)
     func didRunNow(_ job: CronJob)
+    func didAdoptJob(_ job: CronJob)
     func didEditJob(_ job: CronJob)
     func didDeleteJob(_ job: CronJob)
     func didToggleDetail(_ job: CronJob)
@@ -23,11 +24,16 @@ class JobRowView: NSView {
     private weak var delegate: JobRowDelegate?
     /// Whether this job's detail panel is currently open (highlights the ☰ button).
     private let isDetailOpen: Bool
+    /// Whether to reserve the adopt column. Set when the list contains any external
+    /// entry, so the ⬇ button on external rows lines up with a blank slot on
+    /// managed rows and the other action columns stay aligned across every row.
+    private let showAdoptColumn: Bool
 
-    init(job: CronJob, delegate: JobRowDelegate, isDetailOpen: Bool = false) {
+    init(job: CronJob, delegate: JobRowDelegate, isDetailOpen: Bool = false, showAdoptColumn: Bool = false) {
         self.job = job
         self.delegate = delegate
         self.isDetailOpen = isDetailOpen
+        self.showAdoptColumn = showAdoptColumn
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         setupUI()
@@ -123,7 +129,22 @@ class JobRowView: NSView {
         }
         let deleteBtn = actionButton("✕", size: 12, tooltip: "Delete", action: #selector(deletePressed))
 
-        let hStack = NSStackView(views: [toggle, dot, nameLabel, lastRunLabel, runBtn, detailBtn, deleteBtn])
+        // Adopt column: a ⬇ button on external rows, a blank same-width slot on
+        // managed rows. Only present when some row needs it, so an all-managed list
+        // isn't padded with an empty column.
+        var views: [NSView] = [toggle, dot, nameLabel, lastRunLabel]
+        if showAdoptColumn {
+            if job.source == .external {
+                views.append(actionButton("⬇", size: 12, tooltip: "Adopt: log each scheduled run to cmdloop", action: #selector(adoptPressed)))
+            } else {
+                let spacer = NSView()
+                spacer.widthAnchor.constraint(equalToConstant: 20).isActive = true
+                views.append(spacer)
+            }
+        }
+        views.append(contentsOf: [runBtn, detailBtn, deleteBtn])
+
+        let hStack = NSStackView(views: views)
         hStack.orientation = .horizontal
         hStack.alignment = .centerY
         hStack.spacing = 8
@@ -149,6 +170,10 @@ class JobRowView: NSView {
 
     @objc private func runNowPressed() {
         delegate?.didRunNow(job)
+    }
+
+    @objc private func adoptPressed() {
+        delegate?.didAdoptJob(job)
     }
 
     @objc private func detailPressed() {

@@ -143,12 +143,12 @@ extension PopoverViewController {
         showEditForm(for: job) // hides the detail panel and clears the ☰ highlight
     }
 
-    /// Adopts the external entry whose detail panel is open, then refreshes the
-    /// panel in place. The adopted job keeps the same id, so the panel — and its
-    /// run history — stay put; the row's toggle becomes enabled now that cmdloop
-    /// owns it.
-    @objc private func adoptLogsJob() {
-        guard let job = logsJob, job.source == .external else { return }
+    /// Adopts an external entry (shared by the row's ⬇ button and the detail
+    /// panel's ⬇ Adopt button). Confirms first; the adopted job keeps the same id,
+    /// so if its detail panel is open it — and its run history — stay put, and the
+    /// row's toggle becomes enabled now that cmdloop owns it.
+    func adopt(_ job: CronJob) {
+        guard job.source == .external else { return }
         let where_ = job.backend == .launchd ? "LaunchAgent" : "crontab entry"
         guard confirm(
             title: "Adopt “\(job.name)”?",
@@ -156,12 +156,18 @@ extension PopoverViewController {
             action: "Adopt"
         ) else { return }
         guard SchedulerManager.shared.adoptExternal(job) != nil else { return }
+        let panelOpen = !logsContainer.isHidden && logsJob?.id == job.id
         loadJobs() // rebuilds the row list (id unchanged, so the ☰ stays lit)
-        if let adopted = jobs.first(where: { $0.id == job.id }) {
+        if panelOpen, let adopted = jobs.first(where: { $0.id == job.id }) {
             logsJob = adopted
             logsRuns = RunLogStore.shared.runs(for: adopted)
             refreshLogsPanel()
         }
+    }
+
+    @objc private func adoptLogsJob() {
+        guard let job = logsJob else { return }
+        adopt(job)
     }
 
     /// Releases the managed job whose detail panel is open back to plain
