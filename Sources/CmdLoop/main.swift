@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-let cmdloopVersion = "1.6.0"
+let cmdloopVersion = "1.7.0"
 
 // Handle informational CLI flags before any GUI/daemon work.
 let cliArgs = CommandLine.arguments
