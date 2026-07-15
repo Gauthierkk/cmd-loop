@@ -98,18 +98,21 @@ final class SchedulerManager {
     /// logs already recorded for that entry and keeps the display name from
     /// `ExternalNameStore`.
     ///
-    /// For launchd, the original plist is copied to the managed path first (see
-    /// `seedManagedPlist`), so keys cmdloop doesn't model — EnvironmentVariables,
-    /// WorkingDirectory, Nice, etc. — are preserved through the re-sync.
+    /// For launchd, the original agent's extra keys — EnvironmentVariables,
+    /// WorkingDirectory, Nice, etc. — are captured onto the managed job
+    /// (`launchdExtrasData`) so they're reproduced on every sync, including after a
+    /// disable→enable that regenerates the plist from scratch.
     @discardableResult
     func adoptExternal(_ job: CronJob) -> CronJob? {
         guard job.source == .external else { return nil }
         var managed = job
         managed.source = .managed
-        // For launchd, copy the original agent's extra keys into the managed plist
-        // before the external one is torn down (syncManaged then preserves them).
-        if job.backend == .launchd, let ref = LaunchDManager.shared.externalAgents[job.id] {
-            LaunchDManager.shared.seedManagedPlist(for: managed, from: ref.url)
+        // For launchd, capture the original agent's extra keys onto the job before
+        // the external plist is torn down.
+        if job.backend == .launchd,
+           let ref = LaunchDManager.shared.externalAgents[job.id],
+           let dict = LaunchDManager.shared.plistDict(at: ref.url) {
+            managed.launchdExtrasData = LaunchDManager.shared.extractExtrasData(fromPlist: dict)
         }
         // Drop the original external entry first so the command isn't scheduled
         // twice, then persist + sync the managed form (which adds log redirection).

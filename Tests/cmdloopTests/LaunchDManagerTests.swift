@@ -40,13 +40,10 @@ final class LaunchDManagerTests: XCTestCase {
 
     // MARK: - Adoption: extra-key preservation
 
-    func testPlistDictionaryPreservesExtraKeysFromBase() {
-        let job = CronJob(
-            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
-            name: "Adopted", command: "run.sh",
-            schedule: .interval(600), backend: .launchd
-        )
-        let base: [String: Any] = [
+    /// Round-trips an external plist's extra keys through `extractExtrasData` (what
+    /// adoption stores on the job) → `plistDictionary` (what a sync writes).
+    func testExtractedExtrasSurviveIntoManagedPlist() {
+        let external: [String: Any] = [
             "Label": "com.example.old",
             "ProgramArguments": ["/old/path"],
             "StartInterval": 999,
@@ -54,26 +51,47 @@ final class LaunchDManagerTests: XCTestCase {
             "WorkingDirectory": "/tmp/work",
             "Nice": 5,
         ]
-        let dict = manager.plistDictionary(for: job, base: base)
+        let extras = manager.extractExtrasData(fromPlist: external)
+        XCTAssertNotNil(extras, "agent carries extra keys, so data should not be nil")
 
-        // cmdloop's three owned keys are rewritten...
+        let job = CronJob(
+            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+            name: "Adopted", command: "run.sh",
+            schedule: .interval(600), backend: .launchd, launchdExtrasData: extras
+        )
+        let dict = manager.plistDictionary(for: job)
+
+        // cmdloop's three owned keys are rewritten (owned keys from the source are
+        // not carried through)...
         XCTAssertEqual(dict["Label"] as? String, "com.cmdloop.22222222-2222-2222-2222-222222222222")
         XCTAssertEqual(dict["StartInterval"] as? Int, 600)
         let args = dict["ProgramArguments"] as? [String]
         XCTAssertEqual(args?.first, "/bin/zsh")
         XCTAssertTrue((args?.last ?? "").contains("run.sh"))
-        // ...while every extra key the agent carried survives untouched.
+        // ...while every extra key the agent carried survives.
         XCTAssertEqual(dict["WorkingDirectory"] as? String, "/tmp/work")
         XCTAssertEqual(dict["Nice"] as? Int, 5)
         XCTAssertEqual((dict["EnvironmentVariables"] as? [String: String])?["PATH"], "/opt/bin")
     }
 
-    func testPlistDictionaryDropsStaleScheduleKeysFromBase() {
-        // Base is interval-scheduled; the job switched to a calendar schedule.
+    func testExtractExtrasReturnsNilWhenAgentHasNoExtraKeys() {
+        let external: [String: Any] = [
+            "Label": "com.example.plain",
+            "ProgramArguments": ["/bin/zsh", "-l", "-c", "echo hi"],
+            "StartInterval": 300,
+        ]
+        XCTAssertNil(manager.extractExtrasData(fromPlist: external))
+    }
+
+    func testManagedPlistDropsStaleScheduleKeysFromStoredExtras() {
+        // Stored extras accidentally include a schedule key; a schedule change to a
+        // calendar interval must not leave the stale StartInterval behind.
+        let extras = try? PropertyListSerialization.data(
+            fromPropertyList: ["StartInterval": 300], format: .xml, options: 0)
         let job = CronJob(name: "j", command: "echo hi",
-                          schedule: .calendar([CalendarInterval(hour: 3)]), backend: .launchd)
-        let base: [String: Any] = ["StartInterval": 300]
-        let dict = manager.plistDictionary(for: job, base: base)
+                          schedule: .calendar([CalendarInterval(hour: 3)]),
+                          backend: .launchd, launchdExtrasData: extras)
+        let dict = manager.plistDictionary(for: job)
         XCTAssertNil(dict["StartInterval"], "stale interval key must not linger")
         XCTAssertNotNil(dict["StartCalendarInterval"])
     }
