@@ -8,7 +8,7 @@ A minimal macOS menu bar app for managing scheduled commands via **cron or launc
 
 - When adding a command, choose **Cron** (a 5-field cron expression) or **Launchd** (native calendar fields, or an "every N minutes/seconds" interval)
 - Cron jobs created in cmdloop are tagged with a comment marker (`# cmdloop:<uuid>`); launchd jobs are written as `com.cmdloop.<uuid>.plist` LaunchAgents
-- External cron entries (added via terminal) show up as "cronjob"; external launchd agents in `~/Library/LaunchAgents` show up as "launchd job" (common system/Homebrew agents are filtered out). Either can be renamed, edited, run, or deleted; editing rewrites the underlying crontab line or plist in place
+- External cron entries (added via terminal) show up as "cronjob"; external launchd agents in `~/Library/LaunchAgents` show up as "launchd job" (common system/Homebrew agents are filtered out). Either can be renamed, edited, run, deleted, or **adopted** — adopting wraps the entry so cmdloop logs each scheduled run (reversible via **Release**); editing rewrites the underlying crontab line or plist in place
 - Disabling a job removes it from the crontab / unloads and removes its plist; enabling adds it back
 - Jobs run via cron or launchd even if cmdloop isn't open
 
@@ -68,6 +68,8 @@ Per-job actions:
 - **▶ Run now** — execute immediately in the background; the result lands in run history
 - **☰ Details & logs** — opens the detail panel: run count, schedule in plain English, last run time, and each run's output; expand to browse previous runs (10 per page). The ☰ stays highlighted while its panel is open
 - **✎ Edit** (in the detail panel header) — change a job's name, schedule, command, or backend (backend switching is for cmdloop-managed jobs only). Editing an external entry rewrites its crontab line or plist in place and preserves its run history. (An external agent with multiple calendar intervals shows its schedule read-only; name and command remain editable)
+- **⬇ Adopt** (in the detail panel header, external entries only) — take ownership of a pre-existing cron entry or LaunchAgent so cmdloop wraps its command with per-run logging. The schedule and command are unchanged; from then on every scheduled run shows up in run history. Any logs already recorded for the entry, and its display name, carry over
+- **⬆ Release** (in the detail panel header, managed jobs only) — the inverse of Adopt: hand the job back to a plain cron/launchd entry and stop managing it. It keeps running on the same schedule, but new runs are no longer logged; existing run history is kept
 - **✕ Delete** — remove the job and its scheduler entry
 
 Footer:

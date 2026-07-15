@@ -35,6 +35,8 @@ class PopoverViewController: NSViewController, JobRowDelegate, NSTextFieldDelega
     var logsContainer: NSStackView!
     var logsTitleLabel: NSTextField!
     var logsFreqLabel: NSTextField!
+    var adoptBtn: NSButton!
+    var releaseBtn: NSButton!
     var logsSummaryLabel: NSTextField!
     var logsTerminal: TerminalView!
     var expandRunsBtn: NSButton!

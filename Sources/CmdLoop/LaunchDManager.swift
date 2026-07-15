@@ -111,8 +111,17 @@ final class LaunchDManager {
 
     // MARK: - Plist generation (managed jobs)
 
-    func plistDictionary(for job: CronJob) -> [String: Any] {
-        var dict: [String: Any] = [:]
+    /// Builds a managed plist for `job`, layered over `base`. cmdloop owns three
+    /// keys — Label, ProgramArguments, and the schedule — and rewrites them here;
+    /// every other key in `base` (EnvironmentVariables, WorkingDirectory, Nice, …)
+    /// is carried through untouched. `base` is empty for jobs cmdloop created; for
+    /// adopted agents it's the original external plist, so nothing is lost.
+    func plistDictionary(for job: CronJob, base: [String: Any] = [:]) -> [String: Any] {
+        var dict = base
+        // Drop stale schedule keys so switching schedule kinds (calendar↔interval)
+        // never leaves both behind.
+        dict.removeValue(forKey: "StartInterval")
+        dict.removeValue(forKey: "StartCalendarInterval")
         dict["Label"] = label(for: job)
         dict["ProgramArguments"] = ["/bin/zsh", "-l", "-c", wrappedCommand(for: job)]
         for (key, value) in scheduleDict(for: job.schedule) {
@@ -121,8 +130,8 @@ final class LaunchDManager {
         return dict
     }
 
-    func plistContent(for job: CronJob) -> String {
-        let dict = plistDictionary(for: job)
+    func plistContent(for job: CronJob, base: [String: Any] = [:]) -> String {
+        let dict = plistDictionary(for: job, base: base)
         guard let data = try? PropertyListSerialization.data(
             fromPropertyList: dict, format: .xml, options: 0
         ) else { return "" }
@@ -228,7 +237,10 @@ final class LaunchDManager {
 
     private func writeAndLoad(_ job: CronJob) {
         let url = plistURL(for: job)
-        guard let content = plistContent(for: job).data(using: .utf8) else { return }
+        // Layer over whatever is already on disk so keys cmdloop doesn't model
+        // (seeded at adoption, or added by hand) survive every re-sync.
+        let base = plistDict(at: url) ?? [:]
+        guard let content = plistContent(for: job, base: base).data(using: .utf8) else { return }
         // syncManaged re-runs on every save/toggle of any job; when the on-disk
         // agent already matches, skip the launchctl round-trip (two process
         // spawns per job, on the main thread).
@@ -277,6 +289,69 @@ final class LaunchDManager {
         try? data.write(to: ref.url, options: .atomic)
         bootout(label: ref.label)
         bootstrap(plistPath: ref.url.path)
+    }
+
+    // MARK: Adopt / release (prototype)
+
+    /// Seeds the managed plist path with a verbatim copy of the external agent's
+    /// plist, so the subsequent `writeAndLoad` reads it as `base` and preserves the
+    /// keys cmdloop doesn't model. It must be a verbatim copy, not the finished
+    /// managed content: `writeAndLoad` skips loading when the on-disk file already
+    /// matches what it would generate, so seeding the final content would leave the
+    /// adopted agent written-but-never-loaded. Copying the original guarantees the
+    /// contents differ (Label, wrapped command), forcing a real write + bootstrap.
+    func seedManagedPlist(for job: CronJob, from externalURL: URL) {
+        try? FileManager.default.createDirectory(at: agentsDirectory, withIntermediateDirectories: true)
+        let dest = plistURL(for: job)
+        try? FileManager.default.removeItem(at: dest)
+        try? FileManager.default.copyItem(at: externalURL, to: dest)
+    }
+
+    /// Hands a managed launchd job back to launchd as a plain external agent:
+    /// unloads/removes the `com.cmdloop.<uuid>` plist and writes a new one under a
+    /// neutral label with the raw (un-wrapped, un-logged) command. Extra keys from
+    /// the managed plist are carried over. Returns the new external label so the
+    /// caller can persist the display name against it.
+    @discardableResult
+    func releaseToExternal(_ job: CronJob) -> String? {
+        let managedURL = plistURL(for: job)
+        let base = plistDict(at: managedURL) ?? [:]
+        let newLabel = externalReleaseLabel(for: job)
+
+        var dict = base
+        dict.removeValue(forKey: "StartInterval")
+        dict.removeValue(forKey: "StartCalendarInterval")
+        dict["Label"] = newLabel
+        // Raw command, no log redirection — cmdloop no longer records its runs.
+        dict["ProgramArguments"] = ["/bin/zsh", "-l", "-c", job.singleLineCommand]
+        for (key, value) in scheduleDict(for: job.schedule) { dict[key] = value }
+
+        guard let data = try? PropertyListSerialization.data(
+            fromPropertyList: dict, format: .xml, options: 0
+        ) else { return nil }
+
+        // Tear down the managed agent first, then write + load the external one.
+        unloadAndRemove(job)
+        let newURL = agentsDirectory.appendingPathComponent(newLabel + ".plist")
+        try? FileManager.default.createDirectory(at: agentsDirectory, withIntermediateDirectories: true)
+        try? data.write(to: newURL, options: .atomic)
+        // Always load it: external agents have no disabled state in cmdloop's model,
+        // so a released job surfaces as active (matching the crontab release path).
+        bootstrap(plistPath: newURL.path)
+        return newLabel
+    }
+
+    /// A non-cmdloop label for a released agent, derived from the job name (so it
+    /// reads sensibly in the UI) with a uuid suffix for uniqueness. Deliberately
+    /// avoids the `com.cmdloop.` prefix so the agent surfaces as external again.
+    private func externalReleaseLabel(for job: CronJob) -> String {
+        let allowed = CharacterSet.alphanumerics
+        let slug = String(job.name.lowercased().unicodeScalars.map {
+            allowed.contains($0) ? Character($0) : "-"
+        })
+        var base = slug.split(separator: "-").joined(separator: "-")
+        if base.isEmpty { base = "job" }
+        return "local.released.\(base).\(job.id.uuidString.prefix(8))"
     }
 
     private func bootstrap(plistPath: String) {

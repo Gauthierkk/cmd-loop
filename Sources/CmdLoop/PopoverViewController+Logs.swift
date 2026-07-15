@@ -21,7 +21,21 @@ extension PopoverViewController {
         editLogsBtn.bezelStyle = .toolbar
         editLogsBtn.font = .systemFont(ofSize: 11)
 
-        let logsHeader = NSStackView(views: [logsTitleLabel, logsFreqLabel, NSView(), editLogsBtn])
+        // Only meaningful for external entries: adopt them so scheduled runs land
+        // in run history. Hidden for cmdloop-managed jobs (see refreshLogsPanel).
+        adoptBtn = NSButton(title: "⬇ Adopt", target: self, action: #selector(adoptLogsJob))
+        adoptBtn.bezelStyle = .toolbar
+        adoptBtn.font = .systemFont(ofSize: 11)
+        adoptBtn.toolTip = "Take ownership so each scheduled run is logged to cmdloop"
+
+        // The inverse, shown only for managed jobs: hand it back to plain
+        // cron/launchd and stop logging (see refreshLogsPanel).
+        releaseBtn = NSButton(title: "⬆ Release", target: self, action: #selector(releaseLogsJob))
+        releaseBtn.bezelStyle = .toolbar
+        releaseBtn.font = .systemFont(ofSize: 11)
+        releaseBtn.toolTip = "Hand back to cron/launchd; cmdloop stops managing and logging it"
+
+        let logsHeader = NSStackView(views: [logsTitleLabel, logsFreqLabel, NSView(), adoptBtn, releaseBtn, editLogsBtn])
         logsHeader.orientation = .horizontal
         logsHeader.spacing = 6
         logsHeader.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 0, right: 8)
@@ -129,11 +143,60 @@ extension PopoverViewController {
         showEditForm(for: job) // hides the detail panel and clears the ☰ highlight
     }
 
+    /// Adopts the external entry whose detail panel is open, then refreshes the
+    /// panel in place. The adopted job keeps the same id, so the panel — and its
+    /// run history — stay put; the row's toggle becomes enabled now that cmdloop
+    /// owns it.
+    @objc private func adoptLogsJob() {
+        guard let job = logsJob, job.source == .external else { return }
+        let where_ = job.backend == .launchd ? "LaunchAgent" : "crontab entry"
+        guard confirm(
+            title: "Adopt “\(job.name)”?",
+            message: "cmdloop will take ownership of this \(where_) and wrap its command so every scheduled run is recorded here. The schedule and command are unchanged. You can release it again later.",
+            action: "Adopt"
+        ) else { return }
+        guard SchedulerManager.shared.adoptExternal(job) != nil else { return }
+        loadJobs() // rebuilds the row list (id unchanged, so the ☰ stays lit)
+        if let adopted = jobs.first(where: { $0.id == job.id }) {
+            logsJob = adopted
+            logsRuns = RunLogStore.shared.runs(for: adopted)
+            refreshLogsPanel()
+        }
+    }
+
+    /// Releases the managed job whose detail panel is open back to plain
+    /// cron/launchd, then closes the panel (its identity changes, so there's no
+    /// stable job to keep showing).
+    @objc private func releaseLogsJob() {
+        guard let job = logsJob, job.source == .managed else { return }
+        let where_ = job.backend == .launchd ? "a LaunchAgent" : "a crontab entry"
+        guard confirm(
+            title: "Release “\(job.name)”?",
+            message: "cmdloop will hand this job back to \(where_) and stop managing it. It keeps running on the same schedule, but new runs will no longer be logged here. Existing run history is kept.",
+            action: "Release"
+        ) else { return }
+        SchedulerManager.shared.releaseManaged(job)
+        hideLogsPanel()
+        loadJobs()
+    }
+
+    /// A modal yes/no confirmation. Returns true when the user picks the action.
+    private func confirm(title: String, message: String, action: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: action)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     func refreshLogsPanel() {
         guard let job = logsJob else { return }
         let count = logsRuns.count
         logsTitleLabel.stringValue = "\(job.name) : \(count) run\(count == 1 ? "" : "s")"
         logsFreqLabel.stringValue = "· \(job.schedule.englishFrequency)"
+        adoptBtn.isHidden = job.source != .external
+        releaseBtn.isHidden = job.source != .managed
 
         if logsRuns.isEmpty {
             logsSummaryLabel.stringValue = "No recorded runs yet"

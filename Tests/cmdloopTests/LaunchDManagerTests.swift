@@ -38,6 +38,46 @@ final class LaunchDManagerTests: XCTestCase {
         XCTAssertFalse(plist.contains("StandardErrorPath"))
     }
 
+    // MARK: - Adoption: extra-key preservation
+
+    func testPlistDictionaryPreservesExtraKeysFromBase() {
+        let job = CronJob(
+            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+            name: "Adopted", command: "run.sh",
+            schedule: .interval(600), backend: .launchd
+        )
+        let base: [String: Any] = [
+            "Label": "com.example.old",
+            "ProgramArguments": ["/old/path"],
+            "StartInterval": 999,
+            "EnvironmentVariables": ["PATH": "/opt/bin"],
+            "WorkingDirectory": "/tmp/work",
+            "Nice": 5,
+        ]
+        let dict = manager.plistDictionary(for: job, base: base)
+
+        // cmdloop's three owned keys are rewritten...
+        XCTAssertEqual(dict["Label"] as? String, "com.cmdloop.22222222-2222-2222-2222-222222222222")
+        XCTAssertEqual(dict["StartInterval"] as? Int, 600)
+        let args = dict["ProgramArguments"] as? [String]
+        XCTAssertEqual(args?.first, "/bin/zsh")
+        XCTAssertTrue((args?.last ?? "").contains("run.sh"))
+        // ...while every extra key the agent carried survives untouched.
+        XCTAssertEqual(dict["WorkingDirectory"] as? String, "/tmp/work")
+        XCTAssertEqual(dict["Nice"] as? Int, 5)
+        XCTAssertEqual((dict["EnvironmentVariables"] as? [String: String])?["PATH"], "/opt/bin")
+    }
+
+    func testPlistDictionaryDropsStaleScheduleKeysFromBase() {
+        // Base is interval-scheduled; the job switched to a calendar schedule.
+        let job = CronJob(name: "j", command: "echo hi",
+                          schedule: .calendar([CalendarInterval(hour: 3)]), backend: .launchd)
+        let base: [String: Any] = ["StartInterval": 300]
+        let dict = manager.plistDictionary(for: job, base: base)
+        XCTAssertNil(dict["StartInterval"], "stale interval key must not linger")
+        XCTAssertNotNil(dict["StartCalendarInterval"])
+    }
+
     // MARK: - Schedule translation
 
     func testCalendarScheduleRoundTripsThroughPlistKeys() {

@@ -84,4 +84,74 @@ final class SchedulerManager {
         guard let ref = LaunchDManager.shared.externalAgents[job.id] else { return }
         LaunchDManager.shared.updateExternalAgent(ref: ref, command: command, schedule: schedule)
     }
+
+    // MARK: - Adoption (prototype)
+
+    /// Adopts a pre-existing external entry (a crontab line or a LaunchAgent added
+    /// outside cmdloop) as a cmdloop-managed job, so each scheduled run is captured
+    /// in run history. The command itself is unchanged — the managed writers wrap
+    /// it with the per-run log redirection (`CrontabManager.shellLine` /
+    /// `LaunchDManager.wrappedCommand`), which is what "wraps it so it logs".
+    ///
+    /// The job's id is preserved. External ids are derived from stable content
+    /// (cron+command, or the launchd label), so reusing the id carries over any
+    /// logs already recorded for that entry and keeps the display name from
+    /// `ExternalNameStore`.
+    ///
+    /// For launchd, the original plist is copied to the managed path first (see
+    /// `seedManagedPlist`), so keys cmdloop doesn't model — EnvironmentVariables,
+    /// WorkingDirectory, Nice, etc. — are preserved through the re-sync.
+    @discardableResult
+    func adoptExternal(_ job: CronJob) -> CronJob? {
+        guard job.source == .external else { return nil }
+        var managed = job
+        managed.source = .managed
+        // For launchd, copy the original agent's extra keys into the managed plist
+        // before the external one is torn down (syncManaged then preserves them).
+        if job.backend == .launchd, let ref = LaunchDManager.shared.externalAgents[job.id] {
+            LaunchDManager.shared.seedManagedPlist(for: managed, from: ref.url)
+        }
+        // Drop the original external entry first so the command isn't scheduled
+        // twice, then persist + sync the managed form (which adds log redirection).
+        removeExternal(job)
+        var jobs = ConfigManager.shared.load()
+        jobs.append(managed)
+        ConfigManager.shared.save(jobs)
+        syncManaged(jobs)
+        return managed
+    }
+
+    /// Inverse of `adoptExternal`: hands a managed job back to plain cron/launchd
+    /// and drops it from cmdloop's config. The schedule keeps running; cmdloop just
+    /// stops owning it (and stops logging its runs). The job's display name is
+    /// preserved in `ExternalNameStore` so it still reads sensibly as an external
+    /// entry. Returns the job re-derived as external, or nil if it wasn't managed.
+    @discardableResult
+    func releaseManaged(_ job: CronJob) -> CronJob? {
+        guard job.source == .managed else { return nil }
+
+        // Remove it from config + reconcile backends. For cron this rewrites the
+        // crontab block without the job; for launchd it unloads/removes the plist.
+        var jobs = ConfigManager.shared.load()
+        jobs.removeAll { $0.id == job.id }
+        ConfigManager.shared.save(jobs)
+
+        switch job.backend {
+        case .cron:
+            // Re-sync the (now shorter) cmdloop block, then append a plain,
+            // unmarked crontab line carrying the raw command. Always materialize the
+            // entry (external entries have no disabled state in cmdloop's model), so
+            // releasing never silently drops the command.
+            CrontabManager.shared.sync(jobs)
+            CrontabManager.shared.addExternalEntry(cron: job.cronExpression, command: job.singleLineCommand)
+            let key = ExternalNameStore.key(cron: job.cronExpression, command: job.singleLineCommand)
+            ExternalNameStore.shared.setName(job.name, for: key)
+        case .launchd:
+            LaunchDManager.shared.syncManaged(jobs) // no-op for this job; keeps others in sync
+            if let label = LaunchDManager.shared.releaseToExternal(job) {
+                ExternalNameStore.shared.setName(job.name, for: LaunchDManager.shared.externalNameKey(label: label))
+            }
+        }
+        return nil
+    }
 }

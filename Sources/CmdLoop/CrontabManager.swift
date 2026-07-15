@@ -98,6 +98,16 @@ class CrontabManager {
         writeCrontab(lines)
     }
 
+    /// Appends a plain, unmarked crontab line (used when releasing a managed job
+    /// back to a normal cron entry). No `# cmdloop:` marker and no log-redirection
+    /// wrapper, so cmdloop treats it as external and stops recording its runs.
+    func addExternalEntry(cron: String, command: String) {
+        var lines = readCrontab()
+        while lines.last?.isEmpty == true { lines.removeLast() }
+        lines.append("\(cron) \(command)")
+        writeCrontab(lines)
+    }
+
     /// Removes a single external (non-cmdloop) entry from the crontab, leaving all
     /// cmdloop-managed entries and other external lines intact.
     func removeExternalEntry(cron: String, command: String) {
