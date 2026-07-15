@@ -14,6 +14,19 @@ extension PopoverViewController {
         )
         launchAtLoginCheckbox.font = .systemFont(ofSize: 13)
 
+        autoAdoptCheckbox = NSButton(
+            checkboxWithTitle: "Auto-adopt external entries",
+            target: self, action: #selector(toggleAutoAdopt(_:))
+        )
+        autoAdoptCheckbox.font = .systemFont(ofSize: 13)
+
+        let autoAdoptHint = NSTextField(labelWithString: "Takes ownership of cron/launchd entries added outside cmdloop (about twice a day, and at launch) so their scheduled runs are logged. Undo per-entry with Release.")
+        autoAdoptHint.font = .systemFont(ofSize: 10)
+        autoAdoptHint.textColor = .secondaryLabelColor
+        autoAdoptHint.lineBreakMode = .byWordWrapping
+        autoAdoptHint.maximumNumberOfLines = 3
+        autoAdoptHint.preferredMaxLayoutWidth = 380
+
         let clearLogsBtn = NSButton(title: "Clear Logs", target: self, action: #selector(clearLogs))
         clearLogsBtn.bezelStyle = .rounded
 
@@ -43,7 +56,7 @@ extension PopoverViewController {
         retentionHint.maximumNumberOfLines = 2
         retentionHint.preferredMaxLayoutWidth = 380
 
-        settingsContainer = NSStackView(views: [settingsTitle, launchAtLoginCheckbox, retentionRow, retentionHint, settingsButtonRow])
+        settingsContainer = NSStackView(views: [settingsTitle, launchAtLoginCheckbox, autoAdoptCheckbox, autoAdoptHint, retentionRow, retentionHint, settingsButtonRow])
         settingsContainer.orientation = .vertical
         settingsContainer.alignment = .leading
         settingsContainer.spacing = 10
@@ -56,6 +69,7 @@ extension PopoverViewController {
         addFormContainer.isHidden = true
         hideLogsPanel()
         launchAtLoginCheckbox.state = LoginItemManager.shared.isEnabled ? .on : .off
+        autoAdoptCheckbox.state = SettingsStore.shared.autoAdoptExternal ? .on : .off
         // Select the stored run count, clamped into the 1...20 menu.
         let stored = min(max(SettingsStore.shared.logRetentionRuns, 1), 20)
         retentionPopup.selectItem(withTitle: String(stored))
@@ -78,6 +92,14 @@ extension PopoverViewController {
         LoginItemManager.shared.setEnabled(sender.state == .on)
         // Reflect the actual on-disk state in case the change didn't take.
         launchAtLoginCheckbox.state = LoginItemManager.shared.isEnabled ? .on : .off
+    }
+
+    @objc private func toggleAutoAdopt(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        SettingsStore.shared.autoAdoptExternal = enabled
+        // Adopt what's already there right away, so turning it on takes effect
+        // immediately rather than waiting for the next scheduled scrape.
+        if enabled { SchedulerManager.shared.autoAdoptScrape() }
     }
 
     @objc private func clearLogs() {

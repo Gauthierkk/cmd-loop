@@ -21,21 +21,15 @@ extension PopoverViewController {
         editLogsBtn.bezelStyle = .toolbar
         editLogsBtn.font = .systemFont(ofSize: 11)
 
-        // Only meaningful for external entries: adopt them so scheduled runs land
-        // in run history. Hidden for cmdloop-managed jobs (see refreshLogsPanel).
-        adoptBtn = NSButton(title: "⬇ Adopt", target: self, action: #selector(adoptLogsJob))
-        adoptBtn.bezelStyle = .toolbar
-        adoptBtn.font = .systemFont(ofSize: 11)
-        adoptBtn.toolTip = "Take ownership so each scheduled run is logged to cmdloop"
-
-        // The inverse, shown only for managed jobs: hand it back to plain
-        // cron/launchd and stop logging (see refreshLogsPanel).
+        // Shown only for managed jobs: hand it back to plain cron/launchd and stop
+        // logging (see refreshLogsPanel). Auto-adopt (Settings) is the way in;
+        // Release is the per-entry way out.
         releaseBtn = NSButton(title: "⬆ Release", target: self, action: #selector(releaseLogsJob))
         releaseBtn.bezelStyle = .toolbar
         releaseBtn.font = .systemFont(ofSize: 11)
         releaseBtn.toolTip = "Hand back to cron/launchd; cmdloop stops managing and logging it"
 
-        let logsHeader = NSStackView(views: [logsTitleLabel, logsFreqLabel, NSView(), adoptBtn, releaseBtn, editLogsBtn])
+        let logsHeader = NSStackView(views: [logsTitleLabel, logsFreqLabel, NSView(), releaseBtn, editLogsBtn])
         logsHeader.orientation = .horizontal
         logsHeader.spacing = 6
         logsHeader.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 0, right: 8)
@@ -143,33 +137,6 @@ extension PopoverViewController {
         showEditForm(for: job) // hides the detail panel and clears the ☰ highlight
     }
 
-    /// Adopts an external entry (shared by the row's ⬇ button and the detail
-    /// panel's ⬇ Adopt button). Confirms first; the adopted job keeps the same id,
-    /// so if its detail panel is open it — and its run history — stay put, and the
-    /// row's toggle becomes enabled now that cmdloop owns it.
-    func adopt(_ job: CronJob) {
-        guard job.source == .external else { return }
-        let where_ = job.backend == .launchd ? "LaunchAgent" : "crontab entry"
-        guard confirm(
-            title: "Adopt “\(job.name)”?",
-            message: "cmdloop will take ownership of this \(where_) and wrap its command so every scheduled run is recorded here. The schedule and command are unchanged. You can release it again later.",
-            action: "Adopt"
-        ) else { return }
-        guard SchedulerManager.shared.adoptExternal(job) != nil else { return }
-        let panelOpen = !logsContainer.isHidden && logsJob?.id == job.id
-        loadJobs() // rebuilds the row list (id unchanged, so the ☰ stays lit)
-        if panelOpen, let adopted = jobs.first(where: { $0.id == job.id }) {
-            logsJob = adopted
-            logsRuns = RunLogStore.shared.runs(for: adopted)
-            refreshLogsPanel()
-        }
-    }
-
-    @objc private func adoptLogsJob() {
-        guard let job = logsJob else { return }
-        adopt(job)
-    }
-
     /// Releases the managed job whose detail panel is open back to plain
     /// cron/launchd, then closes the panel (its identity changes, so there's no
     /// stable job to keep showing).
@@ -201,7 +168,6 @@ extension PopoverViewController {
         let count = logsRuns.count
         logsTitleLabel.stringValue = "\(job.name) : \(count) run\(count == 1 ? "" : "s")"
         logsFreqLabel.stringValue = "· \(job.schedule.englishFrequency)"
-        adoptBtn.isHidden = job.source != .external
         releaseBtn.isHidden = job.source != .managed
 
         if logsRuns.isEmpty {

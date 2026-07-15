@@ -3,6 +3,8 @@ import AppKit
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
+    /// Fires the periodic auto-adopt scrape (~twice a day) while the app runs.
+    private var autoAdoptTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -32,13 +34,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         _ = vc.view
 
         // Reconciling the schedulers shells out to crontab/launchctl; keep it
-        // off the main thread so launch stays instant.
+        // off the main thread so launch stays instant. An auto-adopt scrape (if
+        // enabled) runs after the sync, in the same block, to avoid racing it.
         DispatchQueue.global(qos: .utility).async {
             let jobs = ConfigManager.shared.load()
             RunLogStore.shared.migrateLegacyLogs(for: jobs)
             SchedulerManager.shared.syncManaged(jobs)
             RunLogStore.shared.prune()
+            if SettingsStore.shared.autoAdoptExternal,
+               SchedulerManager.shared.adoptAllExternal() > 0 {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .jobsDidChange, object: nil)
+                }
+            }
         }
+
+        // Re-scrape roughly twice a day so entries added later get adopted without
+        // needing an app restart. Coarse tolerance lets the OS coalesce the wakeup.
+        let timer = Timer.scheduledTimer(withTimeInterval: 12 * 3600, repeats: true) { _ in
+            SchedulerManager.shared.autoAdoptScrape()
+        }
+        timer.tolerance = 3600
+        autoAdoptTimer = timer
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {

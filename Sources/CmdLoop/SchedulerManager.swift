@@ -121,6 +121,34 @@ final class SchedulerManager {
         return managed
     }
 
+    /// Adopts every external entry cmdloop can currently see, in one pass. Returns
+    /// the number adopted. Idempotent: entries already managed aren't external, so
+    /// re-running only picks up newly-appeared entries. Shells out to
+    /// crontab/launchctl — call off the main thread.
+    @discardableResult
+    func adoptAllExternal() -> Int {
+        // Snapshot the external set once. loadAllJobs() also (re)populates
+        // LaunchDManager.externalAgents, which adoptExternal needs for launchd.
+        let externals = loadAllJobs().filter { $0.source == .external }
+        for job in externals { adoptExternal(job) }
+        return externals.count
+    }
+
+    /// If the auto-adopt setting is on, runs `adoptAllExternal` on a background
+    /// queue and refreshes the UI when anything changed. Safe to call from the main
+    /// thread (e.g. a timer or the settings toggle).
+    func autoAdoptScrape() {
+        guard SettingsStore.shared.autoAdoptExternal else { return }
+        DispatchQueue.global(qos: .utility).async {
+            let adopted = self.adoptAllExternal()
+            if adopted > 0 {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .jobsDidChange, object: nil)
+                }
+            }
+        }
+    }
+
     /// Inverse of `adoptExternal`: hands a managed job back to plain cron/launchd
     /// and drops it from cmdloop's config. The schedule keeps running; cmdloop just
     /// stops owning it (and stops logging its runs). The job's display name is
