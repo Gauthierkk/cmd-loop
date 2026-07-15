@@ -198,6 +198,13 @@ struct CronJob: Codable, Identifiable {
     var lastRunTime: Date?
     var lastRunStatus: RunStatus?
 
+    /// For adopted launchd jobs: the plist keys cmdloop doesn't model
+    /// (EnvironmentVariables, WorkingDirectory, Nice, …), captured at adoption and
+    /// serialized as an XML plist. Persisted so they survive a disable→enable
+    /// round-trip, which removes and regenerates the on-disk plist. Nil for cron
+    /// jobs and launchd jobs cmdloop created itself.
+    var launchdExtrasData: Data?
+
     /// Transient — not persisted. Defaults to `.managed` so decoded config jobs
     /// are always treated as cmdloop-owned.
     var source: JobSource = .managed
@@ -222,10 +229,11 @@ struct CronJob: Codable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, command, schedule, backend, isEnabled, lastRunTime, lastRunStatus
+        case launchdExtrasData
         case cronExpression // legacy field, read-only for migration
     }
 
-    init(id: UUID = UUID(), name: String, command: String, schedule: JobSchedule, backend: JobBackend = .cron, isEnabled: Bool = true, lastRunTime: Date? = nil, lastRunStatus: RunStatus? = nil, source: JobSource = .managed) {
+    init(id: UUID = UUID(), name: String, command: String, schedule: JobSchedule, backend: JobBackend = .cron, isEnabled: Bool = true, lastRunTime: Date? = nil, lastRunStatus: RunStatus? = nil, launchdExtrasData: Data? = nil, source: JobSource = .managed) {
         self.id = id
         self.name = name
         self.command = command
@@ -234,6 +242,7 @@ struct CronJob: Codable, Identifiable {
         self.isEnabled = isEnabled
         self.lastRunTime = lastRunTime
         self.lastRunStatus = lastRunStatus
+        self.launchdExtrasData = launchdExtrasData
         self.source = source
     }
 
@@ -259,6 +268,7 @@ struct CronJob: Codable, Identifiable {
         isEnabled = try c.decode(Bool.self, forKey: .isEnabled)
         lastRunTime = try c.decodeIfPresent(Date.self, forKey: .lastRunTime)
         lastRunStatus = try c.decodeIfPresent(RunStatus.self, forKey: .lastRunStatus)
+        launchdExtrasData = try c.decodeIfPresent(Data.self, forKey: .launchdExtrasData)
         source = .managed
     }
 
@@ -272,6 +282,7 @@ struct CronJob: Codable, Identifiable {
         try c.encode(isEnabled, forKey: .isEnabled)
         try c.encodeIfPresent(lastRunTime, forKey: .lastRunTime)
         try c.encodeIfPresent(lastRunStatus, forKey: .lastRunStatus)
+        try c.encodeIfPresent(launchdExtrasData, forKey: .launchdExtrasData)
     }
 }
 

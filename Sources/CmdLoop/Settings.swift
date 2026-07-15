@@ -6,6 +6,7 @@ final class SettingsStore {
 
     private struct Payload: Codable {
         var logRetentionRuns: Int?
+        var autoAdoptExternal: Bool?
     }
 
     /// Keep this many runs per job (newest first). Defaults to 1; the user can
@@ -14,11 +15,18 @@ final class SettingsStore {
         didSet { persist() }
     }
 
+    /// When on, cmdloop periodically takes ownership of external cron/launchd
+    /// entries (about twice a day, plus at launch) so their scheduled runs are
+    /// logged. Defaults to off. See `SchedulerManager.autoAdoptScrape`.
+    var autoAdoptExternal: Bool = false {
+        didSet { persist() }
+    }
+
     private init() {
         if let data = try? Data(contentsOf: Self.url),
-           let payload = try? JSONDecoder().decode(Payload.self, from: data),
-           let stored = payload.logRetentionRuns {
-            logRetentionRuns = stored
+           let payload = try? JSONDecoder().decode(Payload.self, from: data) {
+            if let stored = payload.logRetentionRuns { logRetentionRuns = stored }
+            if let stored = payload.autoAdoptExternal { autoAdoptExternal = stored }
         }
     }
 
@@ -32,7 +40,8 @@ final class SettingsStore {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(Payload(logRetentionRuns: logRetentionRuns)) else { return }
+        let payload = Payload(logRetentionRuns: logRetentionRuns, autoAdoptExternal: autoAdoptExternal)
+        guard let data = try? encoder.encode(payload) else { return }
         try? data.write(to: Self.url, options: .atomic)
     }
 }

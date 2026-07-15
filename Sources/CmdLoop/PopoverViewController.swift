@@ -29,12 +29,14 @@ class PopoverViewController: NSViewController, JobRowDelegate, NSTextFieldDelega
     // Settings panel — built in PopoverViewController+Settings.swift
     var settingsContainer: NSStackView!
     var launchAtLoginCheckbox: NSButton!
+    var autoAdoptCheckbox: NSButton!
     var retentionPopup: NSPopUpButton!
 
     // Detail/logs panel — built in PopoverViewController+Logs.swift
     var logsContainer: NSStackView!
     var logsTitleLabel: NSTextField!
     var logsFreqLabel: NSTextField!
+    var releaseBtn: NSButton!
     var logsSummaryLabel: NSTextField!
     var logsTerminal: TerminalView!
     var expandRunsBtn: NSButton!

@@ -21,7 +21,15 @@ extension PopoverViewController {
         editLogsBtn.bezelStyle = .toolbar
         editLogsBtn.font = .systemFont(ofSize: 11)
 
-        let logsHeader = NSStackView(views: [logsTitleLabel, logsFreqLabel, NSView(), editLogsBtn])
+        // Shown only for managed jobs: hand it back to plain cron/launchd and stop
+        // logging (see refreshLogsPanel). Auto-adopt (Settings) is the way in;
+        // Release is the per-entry way out.
+        releaseBtn = NSButton(title: "⬆ Release", target: self, action: #selector(releaseLogsJob))
+        releaseBtn.bezelStyle = .toolbar
+        releaseBtn.font = .systemFont(ofSize: 11)
+        releaseBtn.toolTip = "Hand back to cron/launchd; cmdloop stops managing and logging it"
+
+        let logsHeader = NSStackView(views: [logsTitleLabel, logsFreqLabel, NSView(), releaseBtn, editLogsBtn])
         logsHeader.orientation = .horizontal
         logsHeader.spacing = 6
         logsHeader.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 0, right: 8)
@@ -129,11 +137,38 @@ extension PopoverViewController {
         showEditForm(for: job) // hides the detail panel and clears the ☰ highlight
     }
 
+    /// Releases the managed job whose detail panel is open back to plain
+    /// cron/launchd, then closes the panel (its identity changes, so there's no
+    /// stable job to keep showing).
+    @objc private func releaseLogsJob() {
+        guard let job = logsJob, job.source == .managed else { return }
+        let where_ = job.backend == .launchd ? "a LaunchAgent" : "a crontab entry"
+        guard confirm(
+            title: "Release “\(job.name)”?",
+            message: "cmdloop will hand this job back to \(where_) and stop managing it. It keeps running on the same schedule, but new runs will no longer be logged here. Existing run history is kept.",
+            action: "Release"
+        ) else { return }
+        SchedulerManager.shared.releaseManaged(job)
+        hideLogsPanel()
+        loadJobs()
+    }
+
+    /// A modal yes/no confirmation. Returns true when the user picks the action.
+    private func confirm(title: String, message: String, action: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: action)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     func refreshLogsPanel() {
         guard let job = logsJob else { return }
         let count = logsRuns.count
         logsTitleLabel.stringValue = "\(job.name) : \(count) run\(count == 1 ? "" : "s")"
         logsFreqLabel.stringValue = "· \(job.schedule.englishFrequency)"
+        releaseBtn.isHidden = job.source != .managed
 
         if logsRuns.isEmpty {
             logsSummaryLabel.stringValue = "No recorded runs yet"
