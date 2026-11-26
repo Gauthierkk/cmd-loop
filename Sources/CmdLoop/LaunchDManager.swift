@@ -160,6 +160,26 @@ final class LaunchDManager {
         return try? PropertyListSerialization.data(fromPropertyList: extra, format: .xml, options: 0)
     }
 
+    /// The shell command that reproduces an external agent once cmdloop re-homes
+    /// it under `/bin/zsh -l -c`. Nil when the agent can't be reproduced that way,
+    /// so the caller leaves it external: a `Program` key (it would override the
+    /// rewritten ProgramArguments), or a `<shell> -c cmd arg…` form with extra
+    /// positional arguments. A direct argv is shell-quoted, so arguments with
+    /// spaces or metacharacters stay single arguments.
+    func adoptionCommand(fromPlist dict: [String: Any]) -> String? {
+        guard dict["Program"] == nil,
+              let args = dict["ProgramArguments"] as? [String], !args.isEmpty else { return nil }
+        if isShellPath(args[0]), let ci = args.firstIndex(of: "-c"), ci + 1 < args.count {
+            return ci + 2 == args.count ? args[ci + 1] : nil
+        }
+        let safe = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-")
+        return args.map { arg in
+            if !arg.isEmpty, arg.unicodeScalars.allSatisfy({ safe.contains($0) }) { return arg }
+            return "'" + arg.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }.joined(separator: " ")
+    }
+
     /// Wraps the user's command so each launchd fire writes its own run-log file,
     /// matching cron's per-run history. Unlike cron, launchd needs no `%` escaping.
     private func wrappedCommand(for job: CronJob) -> String {
@@ -322,14 +342,7 @@ final class LaunchDManager {
     @discardableResult
     func releaseToExternal(_ job: CronJob) -> String? {
         let newLabel = externalReleaseLabel(for: job)
-
-        var dict = extras(from: job)
-        dict.removeValue(forKey: "StartInterval")
-        dict.removeValue(forKey: "StartCalendarInterval")
-        dict["Label"] = newLabel
-        // Raw command, no log redirection — cmdloop no longer records its runs.
-        dict["ProgramArguments"] = ["/bin/zsh", "-l", "-c", job.singleLineCommand]
-        for (key, value) in scheduleDict(for: job.schedule) { dict[key] = value }
+        let dict = releasePlistDictionary(for: job, label: newLabel)
 
         guard let data = try? PropertyListSerialization.data(
             fromPropertyList: dict, format: .xml, options: 0
@@ -346,17 +359,32 @@ final class LaunchDManager {
         return newLabel
     }
 
+    /// The plist a released job is written as: the job's stored extras, the given
+    /// (non-cmdloop) label, the raw command and the schedule.
+    func releasePlistDictionary(for job: CronJob, label: String) -> [String: Any] {
+        var dict = extras(from: job)
+        dict.removeValue(forKey: "StartInterval")
+        dict.removeValue(forKey: "StartCalendarInterval")
+        dict["Label"] = label
+        // Raw command, no log redirection — cmdloop no longer records its runs.
+        dict["ProgramArguments"] = ["/bin/zsh", "-l", "-c", job.singleLineCommand]
+        for (key, value) in scheduleDict(for: job.schedule) { dict[key] = value }
+        return dict
+    }
+
     /// A non-cmdloop label for a released agent, derived from the job name (so it
-    /// reads sensibly in the UI) with a uuid suffix for uniqueness. Deliberately
-    /// avoids the `com.cmdloop.` prefix so the agent surfaces as external again.
-    private func externalReleaseLabel(for job: CronJob) -> String {
-        let allowed = CharacterSet.alphanumerics
+    /// reads sensibly in the UI) with the job's uuid for uniqueness. ASCII only:
+    /// the label is also the plist filename and a launchctl service target.
+    /// Deliberately avoids the `com.cmdloop.` prefix so the agent surfaces as
+    /// external again.
+    func externalReleaseLabel(for job: CronJob) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789")
         let slug = String(job.name.lowercased().unicodeScalars.map {
             allowed.contains($0) ? Character($0) : "-"
         })
         var base = slug.split(separator: "-").joined(separator: "-")
         if base.isEmpty { base = "job" }
-        return "local.released.\(base).\(job.id.uuidString.prefix(8))"
+        return "local.released.\(base).\(job.id.uuidString.lowercased())"
     }
 
     private func bootstrap(plistPath: String) {

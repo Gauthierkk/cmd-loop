@@ -143,9 +143,12 @@ extension PopoverViewController {
     @objc private func releaseLogsJob() {
         guard let job = logsJob, job.source == .managed else { return }
         let where_ = job.backend == .launchd ? "a LaunchAgent" : "a crontab entry"
+        // External entries have no disabled state, so a released job is always
+        // active. Say so up front rather than silently re-enabling it.
+        let reenable = job.isEnabled ? "" : "This job is disabled. Releasing it turns it back on, and it will run at its next scheduled time.\n\n"
         guard confirm(
             title: "Release “\(job.name)”?",
-            message: "cmdloop will hand this job back to \(where_) and stop managing it. It keeps running on the same schedule, but new runs will no longer be logged here. Existing run history is kept.",
+            message: reenable + "cmdloop will hand this job back to \(where_) and stop managing it. It keeps running on the same schedule, but new runs will no longer be logged here. Existing run history is kept.",
             action: "Release"
         ) else { return }
         SchedulerManager.shared.releaseManaged(job)

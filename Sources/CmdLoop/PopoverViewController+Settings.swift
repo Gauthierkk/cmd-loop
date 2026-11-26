@@ -97,6 +97,7 @@ extension PopoverViewController {
     @objc private func toggleAutoAdopt(_ sender: NSButton) {
         let enabled = sender.state == .on
         SettingsStore.shared.autoAdoptExternal = enabled
+        (NSApp.delegate as? AppDelegate)?.updateAutoAdoptTimer()
         // Adopt what's already there right away, so turning it on takes effect
         // immediately rather than waiting for the next scheduled scrape.
         if enabled { SchedulerManager.shared.autoAdoptScrape() }
