@@ -49,8 +49,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Re-scrape roughly twice a day so entries added later get adopted without
-        // needing an app restart. Coarse tolerance lets the OS coalesce the wakeup.
+        updateAutoAdoptTimer()
+    }
+
+    /// Starts or stops the periodic auto-adopt scrape to match the setting, so the
+    /// app only wakes for it while auto-adopt is on. Re-scrapes roughly twice a day
+    /// so entries added later get adopted without needing an app restart; coarse
+    /// tolerance lets the OS coalesce the wakeup.
+    func updateAutoAdoptTimer() {
+        autoAdoptTimer?.invalidate()
+        autoAdoptTimer = nil
+        guard SettingsStore.shared.autoAdoptExternal else { return }
         let timer = Timer.scheduledTimer(withTimeInterval: 12 * 3600, repeats: true) { _ in
             SchedulerManager.shared.autoAdoptScrape()
         }

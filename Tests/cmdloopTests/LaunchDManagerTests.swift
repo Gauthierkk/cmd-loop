@@ -96,6 +96,63 @@ final class LaunchDManagerTests: XCTestCase {
         XCTAssertNotNil(dict["StartCalendarInterval"])
     }
 
+    // MARK: - Adopt / release
+
+    func testAdoptionCommandKeepsShellFormCommand() {
+        let dict: [String: Any] = ["ProgramArguments": ["/bin/bash", "-c", "echo hi && date"]]
+        XCTAssertEqual(manager.adoptionCommand(fromPlist: dict), "echo hi && date")
+    }
+
+    func testAdoptionCommandQuotesDirectArgv() {
+        let dict: [String: Any] = [
+            "ProgramArguments": ["/usr/local/bin/backup", "--dest", "/Volumes/My Disk", "it's"],
+        ]
+        XCTAssertEqual(manager.adoptionCommand(fromPlist: dict),
+                       "/usr/local/bin/backup --dest '/Volumes/My Disk' 'it'\\''s'")
+    }
+
+    func testAdoptionCommandRefusesAgentsItCannotReproduce() {
+        // `Program` would override the rewritten ProgramArguments.
+        XCTAssertNil(manager.adoptionCommand(fromPlist: [
+            "Program": "/usr/bin/true", "ProgramArguments": ["true"],
+        ]))
+        // Extra positional arguments after the -c command string.
+        XCTAssertNil(manager.adoptionCommand(fromPlist: [
+            "ProgramArguments": ["/bin/sh", "-c", "echo $0", "name"],
+        ]))
+        XCTAssertNil(manager.adoptionCommand(fromPlist: ["Label": "x"]))
+    }
+
+    func testReleaseLabelIsAsciiAndNotCmdloopOwned() {
+        let id = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        let job = CronJob(id: id, name: "Café  Sync!", command: "echo hi",
+                          schedule: .interval(300), backend: .launchd)
+        let label = manager.externalReleaseLabel(for: job)
+        XCTAssertEqual(label, "local.released.caf-sync.22222222-2222-2222-2222-222222222222")
+        XCTAssertFalse(manager.isNoiseLabel(label), "a released agent must surface as external")
+    }
+
+    func testAdoptThenReleaseRoundTripsCommandScheduleAndExtras() {
+        let external: [String: Any] = [
+            "Label": "com.example.backup",
+            "ProgramArguments": ["/bin/zsh", "-l", "-c", "echo hi"],
+            "StartInterval": 300,
+            "WorkingDirectory": "/tmp/work",
+        ]
+        let job = CronJob(name: "Backup",
+                          command: manager.adoptionCommand(fromPlist: external) ?? "",
+                          schedule: .interval(300), backend: .launchd,
+                          launchdExtrasData: manager.extractExtrasData(fromPlist: external))
+
+        let released = manager.releasePlistDictionary(for: job, label: "local.released.backup")
+
+        XCTAssertEqual(released["Label"] as? String, "local.released.backup")
+        // Raw command again: no log redirection once cmdloop stops managing it.
+        XCTAssertEqual(released["ProgramArguments"] as? [String], ["/bin/zsh", "-l", "-c", "echo hi"])
+        XCTAssertEqual(released["StartInterval"] as? Int, 300)
+        XCTAssertEqual(released["WorkingDirectory"] as? String, "/tmp/work")
+    }
+
     // MARK: - Schedule translation
 
     func testCalendarScheduleRoundTripsThroughPlistKeys() {

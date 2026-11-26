@@ -105,36 +105,102 @@ final class SchedulerManager {
     @discardableResult
     func adoptExternal(_ job: CronJob) -> CronJob? {
         guard job.source == .external else { return nil }
+        var jobs = ConfigManager.shared.load()
+        // External ids are derived from content, so an entry re-added after an
+        // earlier adoption (or already adopted by an overlapping pass) has the id
+        // of a job in config. Leave it alone: duplicate ids would lose a job and
+        // trap in `CrontabManager.loadAllJobs`.
+        if let existing = jobs.first(where: { $0.id == job.id }) {
+            // A launchd agent that is back on disk under its original label was
+            // re-created by its owner (an app or installer), and now runs next to
+            // the adopted copy. Give it back: drop the managed copy and stop
+            // adopting it. Run history is kept (same id).
+            if job.backend == .launchd, existing.backend == .launchd,
+               let ref = LaunchDManager.shared.externalAgents[job.id],
+               FileManager.default.fileExists(atPath: ref.url.path) {
+                jobs.removeAll { $0.id == job.id }
+                ConfigManager.shared.save(jobs)
+                LaunchDManager.shared.remove(existing)
+                SettingsStore.shared.excludeFromAutoAdopt(job.id)
+                NotificationCenter.default.post(name: .jobsDidChange, object: nil)
+            }
+            return nil
+        }
+
         var managed = job
         managed.source = .managed
-        // For launchd, capture the original agent's extra keys onto the job before
-        // the external plist is torn down.
-        if job.backend == .launchd,
-           let ref = LaunchDManager.shared.externalAgents[job.id],
-           let dict = LaunchDManager.shared.plistDict(at: ref.url) {
+        switch job.backend {
+        case .cron:
+            // The crontab scan also surfaces non-job lines (`PATH=…`, `MAILTO=…`,
+            // `@reboot …`) as external entries. Wrapping one would corrupt the
+            // crontab, so only adopt a real five-field schedule with a command.
+            guard isAdoptableCronEntry(job) else { return nil }
+        case .launchd:
+            // Capture the original agent's extra keys onto the job before the
+            // external plist is torn down. Without the plist there is nothing to
+            // adopt (and nothing `removeExternal` could remove).
+            guard let ref = LaunchDManager.shared.externalAgents[job.id],
+                  let dict = LaunchDManager.shared.plistDict(at: ref.url),
+                  let command = LaunchDManager.shared.adoptionCommand(fromPlist: dict)
+            else { return nil }
+            managed.command = command
             managed.launchdExtrasData = LaunchDManager.shared.extractExtrasData(fromPlist: dict)
         }
-        // Drop the original external entry first so the command isn't scheduled
-        // twice, then persist + sync the managed form (which adds log redirection).
-        removeExternal(job)
-        var jobs = ConfigManager.shared.load()
+
+        // Persist first and confirm the job is really on disk; only then drop the
+        // original entry. A failed save must never cost the user their schedule.
+        // The managed form is synced after the removal, so the command is never
+        // scheduled twice.
         jobs.append(managed)
         ConfigManager.shared.save(jobs)
+        guard ConfigManager.shared.load().contains(where: { $0.id == managed.id }) else { return nil }
+        removeExternal(job)
         syncManaged(jobs)
         return managed
     }
 
+    /// Whether an external crontab entry is a plain `m h dom mon dow command` job.
+    private func isAdoptableCronEntry(_ job: CronJob) -> Bool {
+        guard !job.command.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        let fieldChars = CharacterSet(charactersIn:
+            "0123456789*/,-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        let fields = job.cronExpression.split(separator: " ", omittingEmptySubsequences: false)
+        return fields.count == 5 && fields.allSatisfy { field in
+            !field.isEmpty && field.unicodeScalars.allSatisfy { fieldChars.contains($0) }
+        }
+    }
+
+    /// Runs `work` on the main thread. Config, the crontab and
+    /// `LaunchDManager.externalAgents` are all read and written from the main
+    /// thread by the UI, so adoption does its mutations there too instead of
+    /// racing them (or another adoption pass) from a background queue.
+    private func onMain<T>(_ work: () -> T) -> T {
+        Thread.isMainThread ? work() : DispatchQueue.main.sync(execute: work)
+    }
+
     /// Adopts every external entry cmdloop can currently see, in one pass. Returns
-    /// the number adopted. Idempotent: entries already managed aren't external, so
-    /// re-running only picks up newly-appeared entries. Shells out to
-    /// crontab/launchctl — call off the main thread.
+    /// the number actually adopted. Idempotent: entries already managed aren't
+    /// external, so re-running only picks up newly-appeared entries. Call off the
+    /// main thread: each entry is adopted in its own hop onto the main thread, so
+    /// passes that overlap (launch, timer, settings toggle) interleave safely and
+    /// the UI stays responsive between entries.
     @discardableResult
     func adoptAllExternal() -> Int {
         // Snapshot the external set once. loadAllJobs() also (re)populates
         // LaunchDManager.externalAgents, which adoptExternal needs for launchd.
-        let externals = loadAllJobs().filter { $0.source == .external }
-        for job in externals { adoptExternal(job) }
-        return externals.count
+        // Released entries (and agents handed back to their owner) are excluded,
+        // so Release sticks while auto-adopt is on.
+        let externals: [CronJob] = onMain {
+            let excluded = SettingsStore.shared.autoAdoptExcluded
+            return self.loadAllJobs().filter {
+                $0.source == .external && !excluded.contains($0.id.uuidString)
+            }
+        }
+        var adopted = 0
+        for job in externals {
+            if onMain({ self.adoptExternal(job) }) != nil { adopted += 1 }
+        }
+        return adopted
     }
 
     /// If the auto-adopt setting is on, runs `adoptAllExternal` on a background
@@ -174,13 +240,20 @@ final class SchedulerManager {
             // entry (external entries have no disabled state in cmdloop's model), so
             // releasing never silently drops the command.
             CrontabManager.shared.sync(jobs)
-            CrontabManager.shared.addExternalEntry(cron: job.cronExpression, command: job.singleLineCommand)
-            let key = ExternalNameStore.key(cron: job.cronExpression, command: job.singleLineCommand)
+            // cron ends a command at an unescaped `%`; the managed wrapper escaped
+            // them, so the raw line must too.
+            let command = job.singleLineCommand.replacingOccurrences(
+                of: #"(?<!\\)%"#, with: #"\\%"#, options: .regularExpression)
+            CrontabManager.shared.addExternalEntry(cron: job.cronExpression, command: command)
+            let key = ExternalNameStore.key(cron: job.cronExpression, command: command)
             ExternalNameStore.shared.setName(job.name, for: key)
+            SettingsStore.shared.excludeFromAutoAdopt(deterministicUUID(from: key))
         case .launchd:
             LaunchDManager.shared.syncManaged(jobs) // no-op for this job; keeps others in sync
             if let label = LaunchDManager.shared.releaseToExternal(job) {
-                ExternalNameStore.shared.setName(job.name, for: LaunchDManager.shared.externalNameKey(label: label))
+                let key = LaunchDManager.shared.externalNameKey(label: label)
+                ExternalNameStore.shared.setName(job.name, for: key)
+                SettingsStore.shared.excludeFromAutoAdopt(deterministicUUID(from: key))
             }
         }
         return nil

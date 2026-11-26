@@ -7,6 +7,7 @@ final class SettingsStore {
     private struct Payload: Codable {
         var logRetentionRuns: Int?
         var autoAdoptExternal: Bool?
+        var autoAdoptExcluded: [String]?
     }
 
     /// Keep this many runs per job (newest first). Defaults to 1; the user can
@@ -22,11 +23,22 @@ final class SettingsStore {
         didSet { persist() }
     }
 
+    /// Ids (uuid strings) of external entries auto-adopt must leave alone: entries
+    /// the user released, and agents whose owner re-creates them after adoption.
+    private(set) var autoAdoptExcluded: Set<String> = [] {
+        didSet { persist() }
+    }
+
+    func excludeFromAutoAdopt(_ id: UUID) {
+        autoAdoptExcluded.insert(id.uuidString)
+    }
+
     private init() {
         if let data = try? Data(contentsOf: Self.url),
            let payload = try? JSONDecoder().decode(Payload.self, from: data) {
             if let stored = payload.logRetentionRuns { logRetentionRuns = stored }
             if let stored = payload.autoAdoptExternal { autoAdoptExternal = stored }
+            if let stored = payload.autoAdoptExcluded { autoAdoptExcluded = Set(stored) }
         }
     }
 
@@ -40,7 +52,8 @@ final class SettingsStore {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let payload = Payload(logRetentionRuns: logRetentionRuns, autoAdoptExternal: autoAdoptExternal)
+        let payload = Payload(logRetentionRuns: logRetentionRuns, autoAdoptExternal: autoAdoptExternal,
+                              autoAdoptExcluded: autoAdoptExcluded.sorted())
         guard let data = try? encoder.encode(payload) else { return }
         try? data.write(to: Self.url, options: .atomic)
     }
