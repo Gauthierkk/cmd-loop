@@ -190,7 +190,7 @@ final class SchedulerManager {
         // LaunchDManager.externalAgents, which adoptExternal needs for launchd.
         // Released entries (and agents handed back to their owner) are excluded,
         // so Release sticks while auto-adopt is on.
-        let externals = onMain {
+        let externals: [CronJob] = onMain {
             let excluded = SettingsStore.shared.autoAdoptExcluded
             return self.loadAllJobs().filter {
                 $0.source == .external && !excluded.contains($0.id.uuidString)
