@@ -110,7 +110,22 @@ final class SchedulerManager {
         // earlier adoption (or already adopted by an overlapping pass) has the id
         // of a job in config. Leave it alone: duplicate ids would lose a job and
         // trap in `CrontabManager.loadAllJobs`.
-        guard !jobs.contains(where: { $0.id == job.id }) else { return nil }
+        if let existing = jobs.first(where: { $0.id == job.id }) {
+            // A launchd agent that is back on disk under its original label was
+            // re-created by its owner (an app or installer), and now runs next to
+            // the adopted copy. Give it back: drop the managed copy and stop
+            // adopting it. Run history is kept (same id).
+            if job.backend == .launchd, existing.backend == .launchd,
+               let ref = LaunchDManager.shared.externalAgents[job.id],
+               FileManager.default.fileExists(atPath: ref.url.path) {
+                jobs.removeAll { $0.id == job.id }
+                ConfigManager.shared.save(jobs)
+                LaunchDManager.shared.remove(existing)
+                SettingsStore.shared.excludeFromAutoAdopt(job.id)
+                NotificationCenter.default.post(name: .jobsDidChange, object: nil)
+            }
+            return nil
+        }
 
         var managed = job
         managed.source = .managed
@@ -173,7 +188,14 @@ final class SchedulerManager {
     func adoptAllExternal() -> Int {
         // Snapshot the external set once. loadAllJobs() also (re)populates
         // LaunchDManager.externalAgents, which adoptExternal needs for launchd.
-        let externals = onMain { self.loadAllJobs() }.filter { $0.source == .external }
+        // Released entries (and agents handed back to their owner) are excluded,
+        // so Release sticks while auto-adopt is on.
+        let externals = onMain {
+            let excluded = SettingsStore.shared.autoAdoptExcluded
+            return self.loadAllJobs().filter {
+                $0.source == .external && !excluded.contains($0.id.uuidString)
+            }
+        }
         var adopted = 0
         for job in externals {
             if onMain({ self.adoptExternal(job) }) != nil { adopted += 1 }
@@ -225,10 +247,13 @@ final class SchedulerManager {
             CrontabManager.shared.addExternalEntry(cron: job.cronExpression, command: command)
             let key = ExternalNameStore.key(cron: job.cronExpression, command: command)
             ExternalNameStore.shared.setName(job.name, for: key)
+            SettingsStore.shared.excludeFromAutoAdopt(deterministicUUID(from: key))
         case .launchd:
             LaunchDManager.shared.syncManaged(jobs) // no-op for this job; keeps others in sync
             if let label = LaunchDManager.shared.releaseToExternal(job) {
-                ExternalNameStore.shared.setName(job.name, for: LaunchDManager.shared.externalNameKey(label: label))
+                let key = LaunchDManager.shared.externalNameKey(label: label)
+                ExternalNameStore.shared.setName(job.name, for: key)
+                SettingsStore.shared.excludeFromAutoAdopt(deterministicUUID(from: key))
             }
         }
         return nil
